@@ -51,7 +51,12 @@ export class AuthController {
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const refreshToken = req.cookies?.['refresh_token']
     if (refreshToken) await this.authService.logout(refreshToken)
-    res.clearCookie('refresh_token')
+    res.clearCookie('refresh_token', {
+      path: '/api/auth',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+    })
   }
 
   @Get('me')

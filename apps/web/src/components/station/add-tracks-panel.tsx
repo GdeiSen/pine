@@ -122,7 +122,6 @@ interface AddTracksPanelProps {
 }
 
 function SortableFolderTrackRow({
-  index,
   track,
   onDelete,
   onStartEdit,
@@ -135,7 +134,6 @@ function SortableFolderTrackRow({
   deleting,
   isCurrentTrack,
 }: {
-  index: number;
   track: PlaylistTrack;
   onDelete: () => void;
   onStartEdit: () => void;
@@ -176,16 +174,6 @@ function SortableFolderTrackRow({
         isCurrentTrack ? "bg-[--color-accent-muted]" : "hover:bg-[--bg-subtle]"
       }`}
     >
-      <span className="w-5 flex items-center justify-end">
-        <span
-          className={`inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-md text-xs font-semibold tabular-nums ${
-            isCurrentTrack ? "text-[#E8440F]" : "text-[--text-muted]"
-          }`}
-        >
-          {index}
-        </span>
-      </span>
-
       <button
         {...attributes}
         {...listeners}
@@ -666,7 +654,7 @@ export function AddTracksPanel({
         <motion.section
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          className="px-8 py-6"
+          className="px-4 py-4 md:px-8 md:py-6"
         >
           <Button
             variant="ghost"
@@ -678,18 +666,18 @@ export function AddTracksPanel({
             Back
           </Button>
 
-          <div className="flex items-center gap-6">
+          <div className="flex flex-col items-center gap-4 md:flex-row md:items-center md:gap-6">
             <ActiveFolderArtwork
               color={activeFolderColor}
               onClick={handleCycleFolderColor}
             />
 
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 w-full text-center md:text-left">
               <input
                 value={folderNameDraft}
                 onChange={(e) => setFolderNameDraft(e.target.value)}
                 placeholder="Folder name"
-                className="w-full bg-transparent text-4xl font-black leading-tight text-[--text-primary] focus:outline-none focus-visible:outline-none"
+                className="w-full bg-transparent text-center md:text-left text-4xl font-black leading-tight text-[--text-primary] focus:outline-none focus-visible:outline-none"
                 style={{
                   background: "transparent",
                   border: "none",
@@ -702,10 +690,10 @@ export function AddTracksPanel({
                   : "No folder selected"}
               </p>
 
-              <div className="mt-4 flex items-center justify-start gap-2 flex-wrap">
+              <div className="mt-4 flex items-center justify-center md:justify-start gap-2 flex-nowrap overflow-x-auto md:flex-wrap md:overflow-visible">
                 <Button
                   size="sm"
-                  className="!px-0"
+                  className="!px-0 shrink-0 md:shrink"
                   onClick={() =>
                     selectedPlaylist?.id &&
                     activateFolderMutation.mutate(selectedPlaylist.id)
@@ -724,6 +712,7 @@ export function AddTracksPanel({
                 <Button
                   size="sm"
                   variant="secondary"
+                  className="shrink-0 md:shrink"
                   onClick={() => setIsUploadMode((prev) => !prev)}
                   disabled={!selectedPlaylist}
                 >
@@ -733,6 +722,7 @@ export function AddTracksPanel({
                 <Button
                   size="sm"
                   variant="danger"
+                  className="shrink-0 md:shrink"
                   onClick={handleDeleteFolder}
                   isLoading={deleteFolderMutation.isPending}
                   disabled={!selectedPlaylist || selectedPlaylist.isDefault}
@@ -746,7 +736,7 @@ export function AddTracksPanel({
         </motion.section>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto p-3 md:p-8">
         {isUploadMode ? (
           <motion.section
             initial={{ opacity: 0, y: 8 }}
@@ -884,7 +874,6 @@ export function AddTracksPanel({
                     {orderedTracks.map((track, idx) => (
                       <SortableFolderTrackRow
                         key={track.id}
-                        index={idx + 1}
                         track={track}
                         isCurrentTrack={track.id === currentTrackId}
                         canReorder={!reorderTracksMutation.isPending}

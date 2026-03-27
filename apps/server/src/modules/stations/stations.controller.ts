@@ -9,6 +9,8 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  ParseUUIDPipe,
+  BadRequestException,
 } from '@nestjs/common'
 import { StationsService } from './stations.service'
 import { CreateStationDto } from './dto/create-station.dto'
@@ -48,6 +50,9 @@ export class StationsController {
   @Get(':code')
   @UseGuards(OptionalJwtGuard)
   findByCode(@Param('code') code: string, @CurrentUser() user: { id: string } | null) {
+    if (!/^\d{6}$/.test(code)) {
+      throw new BadRequestException('Invalid station code')
+    }
     return this.stationsService.findByCode(code, user?.id)
   }
 
@@ -58,13 +63,16 @@ export class StationsController {
     @CurrentUser() user: { id: string },
     @Body() dto: JoinDto,
   ) {
+    if (!/^\d{6}$/.test(code)) {
+      throw new BadRequestException('Invalid station code')
+    }
     return this.stationsService.join(code, user.id, dto.password)
   }
 
   @Put(':id')
   @UseGuards(JwtAuthGuard)
   update(
-    @Param('id') id: string,
+    @Param('id', new ParseUUIDPipe()) id: string,
     @CurrentUser() user: { id: string },
     @Body() dto: UpdateStationDto,
   ) {
@@ -74,7 +82,7 @@ export class StationsController {
   @Delete(':id')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
-  delete(@Param('id') id: string, @CurrentUser() user: { id: string }) {
+  delete(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: { id: string }) {
     return this.stationsService.delete(id, user.id)
   }
 }

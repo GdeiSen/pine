@@ -81,6 +81,10 @@ export class AuthService {
   }
 
   async refresh(refreshToken: string) {
+    if (!this.isValidRefreshToken(refreshToken)) {
+      throw new UnauthorizedException('Invalid refresh token')
+    }
+
     const stored = await this.prisma.refreshToken.findUnique({ where: { token: refreshToken } })
     if (!stored || stored.expiresAt < new Date()) {
       throw new UnauthorizedException('Invalid refresh token')
@@ -103,6 +107,7 @@ export class AuthService {
   }
 
   async logout(refreshToken: string) {
+    if (!this.isValidRefreshToken(refreshToken)) return
     await this.prisma.refreshToken.deleteMany({ where: { token: refreshToken } })
   }
 
@@ -219,6 +224,10 @@ export class AuthService {
 
   private normalizeEmail(email: string) {
     return email.trim().toLowerCase()
+  }
+
+  private isValidRefreshToken(token: unknown): token is string {
+    return typeof token === 'string' && /^[0-9a-f-]{36}$/i.test(token)
   }
 
   private ensureEmailIsWhitelisted(email: string) {

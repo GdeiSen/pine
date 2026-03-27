@@ -26,6 +26,7 @@ import {
   PLAYBACK_SYNC_INTERVAL_MS,
   SystemQueueMode,
 } from '@web-radio/shared'
+import { isAllowedOrigin, resolveAllowedOrigins } from '../../common/security/cors'
 
 interface AuthSocket extends Socket {
   userId?: string
@@ -47,9 +48,23 @@ interface PlaybackState {
   history: Array<{ trackId: string; queueItemId: string }>
 }
 
+const gatewayAllowedOrigins = resolveAllowedOrigins(
+  process.env.ALLOWED_ORIGINS,
+  process.env.CLIENT_URL ?? 'http://localhost:3000',
+)
+
 @WebSocketGateway({
   namespace: '/station',
-  cors: { origin: '*', credentials: true },
+  cors: {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      if (isAllowedOrigin(origin, gatewayAllowedOrigins)) {
+        callback(null, true)
+        return
+      }
+      callback(new Error('Origin is not allowed by CORS'))
+    },
+    credentials: true,
+  },
 })
 export class StationGateway
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
@@ -144,6 +159,7 @@ export class StationGateway
     @MessageBody() data: { code: string; password?: string },
   ) {
     if (!client.userId) throw new WsException('Authentication required')
+    if (!/^\d{6}$/.test(data.code)) throw new WsException('Invalid station code')
 
     try {
       await this.stationsService.join(data.code, client.userId, data.password)

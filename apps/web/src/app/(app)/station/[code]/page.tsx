@@ -227,8 +227,7 @@ export default function StationPage({
       setIsJoinChecking(true);
 
       const hasToken =
-        typeof window !== "undefined" &&
-        !!localStorage.getItem("access_token");
+        typeof window !== "undefined" && !!localStorage.getItem("access_token");
 
       if (!hasToken) {
         try {
@@ -418,7 +417,9 @@ export default function StationPage({
 
     // Keep online owner always visible on the map, even when slots are limited.
     if (ownerId) {
-      const ownerIndex = combined.findIndex((member) => member.user.id === ownerId);
+      const ownerIndex = combined.findIndex(
+        (member) => member.user.id === ownerId,
+      );
       if (ownerIndex > 0) {
         const [ownerMember] = combined.splice(ownerIndex, 1);
         combined.unshift(ownerMember);
@@ -704,11 +705,7 @@ export default function StationPage({
               required
             />
 
-            {joinError && (
-              <p className="text-sm text-red-400">
-                {joinError}
-              </p>
-            )}
+            {joinError && <p className="text-sm text-red-400">{joinError}</p>}
 
             <div className="grid grid-cols-2 gap-2 w-full">
               <Button
@@ -938,7 +935,7 @@ export default function StationPage({
           )}
         </div>
         {compactNowPlaying && (
-          <div className="pointer-events-none absolute left-1/2 -translate-x-1/2 max-w-[62%] px-4">
+          <div className="pointer-events-none hidden md:block absolute left-1/2 -translate-x-1/2 max-w-[62%] px-4">
             <p className="truncate text-center text-sm font-semibold text-[--text-primary]">
               {compactNowPlaying}
             </p>
@@ -1088,7 +1085,7 @@ export default function StationPage({
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
                       transition={{ duration: 0.12 }}
-                      className="p-4"
+                      className="px-0 py-4 md:p-4"
                     >
                       <QueueLibraryPanel
                         stationId={station?.id ?? ""}
@@ -1122,7 +1119,7 @@ export default function StationPage({
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
                       transition={{ duration: 0.12 }}
-                      className="px-4 pb-4 space-y-3"
+                      className="px-2 pb-4 md:px-4 md:pb-4 space-y-3"
                     >
                       {memberActionError && (
                         <p className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-xl">

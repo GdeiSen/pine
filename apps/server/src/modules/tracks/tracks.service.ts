@@ -24,7 +24,7 @@ export class TracksService {
     private prisma: PrismaService,
     private configService: ConfigService,
   ) {
-    this.storagePath = this.configService.get<string>('STORAGE_PATH', './storage')
+    this.storagePath = path.resolve(this.configService.get<string>('STORAGE_PATH', './storage'))
   }
 
   async upload(
@@ -38,6 +38,9 @@ export class TracksService {
       this.safeDeleteFile(file.path)
       throw new BadRequestException('Unsupported audio format')
     }
+
+    await this.assertStationMember(stationId, userId)
+    await this.assertPlaylistBelongsToStation(playlistId, stationId)
 
     const usedStorage = await this.getUserUsedStorageBytes(userId)
     if (usedStorage + file.size > USER_STORAGE_LIMIT_BYTES) {
@@ -116,7 +119,9 @@ export class TracksService {
     return this.formatTrack(track)
   }
 
-  async getStationTracks(stationId: string) {
+  async getStationTracks(stationId: string, userId: string) {
+    await this.assertStationMember(stationId, userId)
+
     const tracks = await this.prisma.track.findMany({
       where: { stationId },
       include: {
@@ -127,7 +132,14 @@ export class TracksService {
     return tracks.map(this.formatTrack)
   }
 
-  async getPlaylistTracks(playlistId: string) {
+  async getPlaylistTracks(playlistId: string, userId: string) {
+    const playlist = await this.prisma.playlist.findUnique({
+      where: { id: playlistId },
+      select: { stationId: true },
+    })
+    if (!playlist) throw new NotFoundException('Playlist not found')
+    await this.assertStationMember(playlist.stationId, userId)
+
     const items = await this.prisma.playlistTrack.findMany({
       where: { playlistId },
       include: {
@@ -152,9 +164,11 @@ export class TracksService {
     range: string | undefined,
     res: any,
     qualityParam?: string,
+    userId?: string,
   ) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track) throw new NotFoundException('Track not found')
+    await this.assertStationReadable(track.stationId, userId)
 
     const quality = (qualityParam ?? '').toUpperCase()
     const desired = Object.values(StreamQuality).includes(quality as StreamQuality)
@@ -168,11 +182,12 @@ export class TracksService {
           ? (track.mediumPath ?? track.highPath ?? track.lowPath ?? track.originalPath)
           : (track.highPath ?? track.mediumPath ?? track.lowPath ?? track.originalPath)
 
-    if (!fs.existsSync(filePath)) throw new NotFoundException('Audio file not found')
+    const safePath = this.resolveSafeStorageFilePath(filePath)
+    if (!safePath || !fs.existsSync(safePath)) throw new NotFoundException('Audio file not found')
 
-    const stat = fs.statSync(filePath)
+    const stat = fs.statSync(safePath)
     const fileSize = stat.size
-    const mimeType = this.getMimeType(filePath)
+    const mimeType = this.getMimeType(safePath)
 
     if (range) {
       const parts = range.replace(/bytes=/, '').split('-')
@@ -188,7 +203,7 @@ export class TracksService {
         'Content-Type': mimeType,
       })
 
-      const stream = fs.createReadStream(filePath, { start, end })
+      const stream = fs.createReadStream(safePath, { start, end })
       stream.pipe(res)
     } else {
       res.set({
@@ -196,7 +211,7 @@ export class TracksService {
         'Content-Type': mimeType,
         'Accept-Ranges': 'bytes',
       })
-      fs.createReadStream(filePath).pipe(res)
+      fs.createReadStream(safePath).pipe(res)
     }
 
     // Increment play count
@@ -206,13 +221,17 @@ export class TracksService {
     }).catch(() => {})
   }
 
-  async getCover(trackId: string, res: any) {
+  async getCover(trackId: string, res: any, userId?: string) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track || !track.coverPath) throw new NotFoundException('Cover not found')
-    if (!fs.existsSync(track.coverPath)) throw new NotFoundException('Cover file not found')
+    await this.assertStationReadable(track.stationId, userId)
+    const safeCoverPath = this.resolveSafeStorageFilePath(track.coverPath)
+    if (!safeCoverPath || !fs.existsSync(safeCoverPath)) {
+      throw new NotFoundException('Cover file not found')
+    }
 
     res.set({ 'Content-Type': 'image/webp', 'Cache-Control': 'public, max-age=86400' })
-    fs.createReadStream(track.coverPath).pipe(res)
+    fs.createReadStream(safeCoverPath).pipe(res)
   }
 
   async deleteTrack(trackId: string, userId: string) {
@@ -231,7 +250,8 @@ export class TracksService {
     // Delete files
     const files = [track.originalPath, track.coverPath].filter(Boolean) as string[]
     for (const f of files) {
-      if (fs.existsSync(f)) fs.unlinkSync(f)
+      const safePath = this.resolveSafeStorageFilePath(f)
+      if (safePath && fs.existsSync(safePath)) fs.unlinkSync(safePath)
     }
 
     await this.prisma.track.delete({ where: { id: trackId } })
@@ -274,9 +294,10 @@ export class TracksService {
     return this.formatTrack(updated)
   }
 
-  async getWaveform(trackId: string) {
+  async getWaveform(trackId: string, userId?: string) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track) throw new NotFoundException('Track not found')
+    await this.assertStationReadable(track.stationId, userId)
     if (!track.waveformData) return { data: [] }
     return { data: JSON.parse(track.waveformData) }
   }
@@ -325,12 +346,67 @@ export class TracksService {
 
   private safeDeleteFile(filePath?: string) {
     try {
-      if (filePath && fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath)
+      const safePath = this.resolveSafeStorageFilePath(filePath)
+      if (safePath && fs.existsSync(safePath)) {
+        fs.unlinkSync(safePath)
       }
     } catch (_e) {
       // best effort cleanup
     }
+  }
+
+  private resolveSafeStorageFilePath(filePath?: string | null): string | null {
+    if (!filePath) return null
+    const resolved = path.resolve(filePath)
+    if (resolved === this.storagePath || resolved.startsWith(`${this.storagePath}${path.sep}`)) {
+      return resolved
+    }
+    return null
+  }
+
+  private async assertStationMember(stationId: string, userId: string) {
+    const [station, member] = await Promise.all([
+      this.prisma.station.findUnique({
+        where: { id: stationId },
+        select: { id: true, ownerId: true },
+      }),
+      this.prisma.stationMember.findUnique({
+        where: { stationId_userId: { stationId, userId } },
+        select: { id: true },
+      }),
+    ])
+
+    if (!station) throw new NotFoundException('Station not found')
+    if (station.ownerId === userId || member) return
+    throw new ForbiddenException('Access denied')
+  }
+
+  private async assertPlaylistBelongsToStation(playlistId: string, stationId: string) {
+    const playlist = await this.prisma.playlist.findUnique({
+      where: { id: playlistId },
+      select: { stationId: true },
+    })
+    if (!playlist) throw new NotFoundException('Playlist not found')
+    if (playlist.stationId !== stationId) {
+      throw new BadRequestException('Playlist does not belong to this station')
+    }
+  }
+
+  private async assertStationReadable(stationId: string, userId?: string) {
+    const station = await this.prisma.station.findUnique({
+      where: { id: stationId },
+      select: { id: true, accessMode: true, ownerId: true },
+    })
+    if (!station) throw new NotFoundException('Station not found')
+    if (station.accessMode === 'PUBLIC') return
+    if (!userId) throw new ForbiddenException('Authentication required')
+    if (station.ownerId === userId) return
+
+    const member = await this.prisma.stationMember.findUnique({
+      where: { stationId_userId: { stationId: station.id, userId } },
+      select: { id: true },
+    })
+    if (!member) throw new ForbiddenException('Access denied')
   }
 
   private formatBytes(bytes: number) {

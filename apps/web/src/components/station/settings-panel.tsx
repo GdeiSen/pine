@@ -306,7 +306,7 @@ export function SettingsPanel({
         <motion.section
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          className="px-8 py-6"
+          className="px-4 py-6 md:px-8 md:py-6"
         >
           <div className="flex items-start justify-between mb-3">
             <Button
@@ -419,7 +419,7 @@ export function SettingsPanel({
         </motion.section>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8">
+      <div className="flex-1 overflow-y-auto px-3 py-8 md:p-8">
         <div className="flex flex-col gap-8 w-full max-w-[920px]">
           <motion.section
             initial={{ opacity: 0, y: 8 }}
@@ -534,14 +534,8 @@ export function SettingsPanel({
               <p className="mb-6 text-4xl font-black text-[--text-primary] tracking-tight leading-none">
                 Playback
               </p>
-              <p className="-mt-4 mb-6 text-sm text-[--text-muted]">
-                Crossfade is fixed at 3 seconds by default.
-              </p>
 
               <div className="mt-5">
-                <p className="mb-6 mt-2 text-xl text-[--text-muted]">
-                  Transmission Quality
-                </p>
                 <p className="-mt-4 mb-4 text-sm text-[--text-muted]">
                   Select stream quality based on listener network conditions:
                   lower quality saves traffic and reduces buffering risk, while

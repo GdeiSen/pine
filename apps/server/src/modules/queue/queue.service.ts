@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common'
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common'
 import { PrismaService } from '../../prisma/prisma.service'
 import { QueueType, QueueItemStatus, SystemQueueMode } from '@web-radio/shared'
 
@@ -11,7 +11,9 @@ type AddToQueueOptions = {
 export class QueueService {
   constructor(private prisma: PrismaService) {}
 
-  async getQueue(stationId: string) {
+  async getQueue(stationId: string, userId?: string) {
+    if (userId) await this.assertStationMember(stationId, userId)
+
     const items = await this.prisma.queueItem.findMany({
       where: { stationId, status: QueueItemStatus.PENDING },
       include: {
@@ -34,8 +36,13 @@ export class QueueService {
   }
 
   async addToQueue(stationId: string, trackId: string, userId: string, options?: AddToQueueOptions) {
+    await this.assertStationMember(stationId, userId)
+
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track) throw new NotFoundException('Track not found')
+    if (track.stationId !== stationId) {
+      throw new NotFoundException('Track not found in this station')
+    }
 
     const mode = options?.mode ?? 'end'
     const beforeItemId = options?.beforeItemId
@@ -92,7 +99,9 @@ export class QueueService {
     return this.formatQueueItem(item)
   }
 
-  async removeFromQueue(stationId: string, itemId: string) {
+  async removeFromQueue(stationId: string, itemId: string, userId?: string) {
+    if (userId) await this.assertStationMember(stationId, userId)
+
     const item = await this.prisma.queueItem.findUnique({ where: { id: itemId } })
     if (!item || item.stationId !== stationId) {
       throw new NotFoundException('Queue item not found')
@@ -113,7 +122,9 @@ export class QueueService {
     }
   }
 
-  async reorderQueue(stationId: string, items: Array<{ id: string; position: number }>) {
+  async reorderQueue(stationId: string, items: Array<{ id: string; position: number }>, userId?: string) {
+    if (userId) await this.assertStationMember(stationId, userId)
+
     await Promise.all(
       items.map((item) =>
         this.prisma.queueItem.updateMany({
@@ -308,5 +319,22 @@ export class QueueService {
       position: item.position,
       status: item.status,
     }
+  }
+
+  private async assertStationMember(stationId: string, userId: string) {
+    const [station, member] = await Promise.all([
+      this.prisma.station.findUnique({
+        where: { id: stationId },
+        select: { id: true, ownerId: true },
+      }),
+      this.prisma.stationMember.findUnique({
+        where: { stationId_userId: { stationId, userId } },
+        select: { id: true },
+      }),
+    ])
+
+    if (!station) throw new NotFoundException('Station not found')
+    if (station.ownerId === userId || member) return
+    throw new ForbiddenException('Access denied')
   }
 }

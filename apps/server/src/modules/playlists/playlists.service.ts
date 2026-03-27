@@ -17,7 +17,9 @@ export class PlaylistsService {
     private queueService: QueueService,
   ) {}
 
-  async getStationPlaylists(stationId: string) {
+  async getStationPlaylists(stationId: string, userId: string) {
+    await this.assertStationMember(stationId, userId)
+
     const playlists = await this.prisma.playlist.findMany({
       where: { stationId },
       include: {
@@ -72,7 +74,9 @@ export class PlaylistsService {
     await this.prisma.playlist.delete({ where: { id: playlistId } })
   }
 
-  async activate(playlistId: string, stationId: string) {
+  async activate(playlistId: string, stationId: string, userId: string) {
+    await this.assertStationAccess(stationId, userId)
+
     const playlist = await this.prisma.playlist.findUnique({ where: { id: playlistId } })
     if (!playlist || playlist.stationId !== stationId) {
       throw new NotFoundException('Playlist not found')
@@ -117,5 +121,16 @@ export class PlaylistsService {
         throw new ForbiddenException('Access denied')
       }
     }
+  }
+
+  private async assertStationMember(stationId: string, userId: string) {
+    const station = await this.prisma.station.findUnique({ where: { id: stationId } })
+    if (!station) throw new NotFoundException('Station not found')
+    if (station.ownerId === userId) return
+
+    const member = await this.prisma.stationMember.findUnique({
+      where: { stationId_userId: { stationId, userId } },
+    })
+    if (!member) throw new ForbiddenException('Access denied')
   }
 }

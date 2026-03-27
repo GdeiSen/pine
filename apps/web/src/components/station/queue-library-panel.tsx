@@ -349,8 +349,8 @@ function SortableQueueRow({
         transition,
         opacity: isDragging ? 0.5 : 1,
       }}
-      className={`flex items-center gap-3 rounded-xl transition-colors ${
-        item.queueType === "USER" ? "px-0 py-2.5" : "p-2.5"
+      className={`flex items-center gap-2 md:gap-3 rounded-xl transition-colors ${
+        item.queueType === "USER" ? "px-0 py-1.5 md:py-2.5" : "p-1.5 md:p-2.5"
       } ${
         isCurrentTrack ? "bg-[--color-accent-muted]" : "hover:bg-[--bg-subtle]"
       }`}
@@ -541,7 +541,7 @@ function SortableLibraryRow({
         transition,
         opacity: isDragging ? 0.5 : 1,
       }}
-      className="relative flex items-center gap-3 p-2.5 rounded-xl hover:bg-[--bg-subtle] transition-colors"
+      className="relative flex items-center gap-2 md:gap-3 p-1.5 md:p-2.5 rounded-xl hover:bg-[--bg-subtle] transition-colors"
     >
       <span className="w-5 flex items-center justify-end">
         <span
@@ -865,53 +865,51 @@ export function QueueLibraryPanel({
         </AnimatePresence>
 
         <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
-                Library
-              </p>
+          <div>
+            <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
+              Library
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <div className="relative w-full sm:w-[220px] max-w-full">
+              <Search
+                size={14}
+                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[--text-muted]"
+              />
+              <input
+                data-no-focus-ring="true"
+                type="text"
+                value={trackSearch}
+                onChange={(e) => setTrackSearch(e.target.value)}
+                placeholder="search"
+                className="h-8 w-full rounded-lg !border-0 border-none pl-8 pr-8 text-sm text-[--text-primary] placeholder:text-[--text-muted] !outline-none transition-all focus:!border-0 focus:!outline-none focus-visible:!border-0 focus-visible:!outline-none focus:ring-0 focus-visible:ring-0"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  outline: "none",
+                  boxShadow: "none",
+                }}
+              />
+              {trackSearch && (
+                <button
+                  type="button"
+                  onClick={() => setTrackSearch("")}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-[--text-muted] hover:bg-[--bg-elevated] hover:text-[--text-primary]"
+                  title="Clear search"
+                >
+                  <X size={13} />
+                </button>
+              )}
             </div>
-            <div className="flex items-center gap-1.5">
-              <div className="relative w-[220px] max-w-full">
-                <Search
-                  size={14}
-                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[--text-muted]"
-                />
-                <input
-                  data-no-focus-ring="true"
-                  type="text"
-                  value={trackSearch}
-                  onChange={(e) => setTrackSearch(e.target.value)}
-                  placeholder="search"
-                  className="h-8 w-full rounded-lg !border-0 border-none pl-8 pr-8 text-sm text-[--text-primary] placeholder:text-[--text-muted] !outline-none transition-all focus:!border-0 focus:!outline-none focus-visible:!border-0 focus-visible:!outline-none focus:ring-0 focus-visible:ring-0"
-                  style={{
-                    background: "transparent",
-                    border: "none",
-                    outline: "none",
-                    boxShadow: "none",
-                  }}
-                />
-                {trackSearch && (
-                  <button
-                    type="button"
-                    onClick={() => setTrackSearch("")}
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-[--text-muted] hover:bg-[--bg-elevated] hover:text-[--text-primary]"
-                    title="Clear search"
-                  >
-                    <X size={13} />
-                  </button>
-                )}
-              </div>
-              <Button
-                size="icon-sm"
-                variant="ghost"
-                onClick={() => createFolderMutation.mutate("New folder")}
-                title="Create folder"
-                isLoading={createFolderMutation.isPending}
-              >
-                <Plus size={13} />
-              </Button>
-            </div>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              onClick={() => createFolderMutation.mutate("New folder")}
+              title="Create folder"
+              isLoading={createFolderMutation.isPending}
+            >
+              <Plus size={13} />
+            </Button>
           </div>
 
           <div className="mt-10 mb-10 -ml-6">
@@ -931,7 +929,7 @@ export function QueueLibraryPanel({
           </div>
 
           <div
-            className="rounded-2xl p-2"
+            className="rounded-2xl p-1 md:p-2"
             style={{
               background: "var(--bg-elevated)",
               border: "1px solid var(--border)",

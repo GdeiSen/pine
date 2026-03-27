@@ -9,16 +9,17 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  ParseUUIDPipe,
 } from '@nestjs/common'
 import { PlaylistsService, CreatePlaylistDto } from './playlists.service'
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard'
 import { CurrentUser } from '../../common/decorators/current-user.decorator'
 import { TracksService } from '../tracks/tracks.service'
-import { IsArray, IsInt, IsString, ValidateNested } from 'class-validator'
+import { IsArray, IsInt, IsUUID, ValidateNested } from 'class-validator'
 import { Type } from 'class-transformer'
 
 class ReorderPlaylistTrackItemDto {
-  @IsString()
+  @IsUUID()
   trackId: string
 
   @IsInt()
@@ -41,13 +42,16 @@ export class PlaylistsController {
   ) {}
 
   @Get('stations/:stationId/playlists')
-  getPlaylists(@Param('stationId') stationId: string) {
-    return this.playlistsService.getStationPlaylists(stationId)
+  getPlaylists(
+    @Param('stationId', new ParseUUIDPipe()) stationId: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.playlistsService.getStationPlaylists(stationId, user.id)
   }
 
   @Post('stations/:stationId/playlists')
   create(
-    @Param('stationId') stationId: string,
+    @Param('stationId', new ParseUUIDPipe()) stationId: string,
     @CurrentUser() user: { id: string },
     @Body() dto: CreatePlaylistDto,
   ) {
@@ -56,7 +60,7 @@ export class PlaylistsController {
 
   @Put('playlists/:id')
   update(
-    @Param('id') id: string,
+    @Param('id', new ParseUUIDPipe()) id: string,
     @CurrentUser() user: { id: string },
     @Body('name') name: string,
   ) {
@@ -65,26 +69,30 @@ export class PlaylistsController {
 
   @Delete('playlists/:id')
   @HttpCode(HttpStatus.NO_CONTENT)
-  delete(@Param('id') id: string, @CurrentUser() user: { id: string }) {
+  delete(@Param('id', new ParseUUIDPipe()) id: string, @CurrentUser() user: { id: string }) {
     return this.playlistsService.delete(id, user.id)
   }
 
   @Post('stations/:stationId/playlists/:playlistId/activate')
   activate(
-    @Param('stationId') stationId: string,
-    @Param('playlistId') playlistId: string,
+    @Param('stationId', new ParseUUIDPipe()) stationId: string,
+    @Param('playlistId', new ParseUUIDPipe()) playlistId: string,
+    @CurrentUser() user: { id: string },
   ) {
-    return this.playlistsService.activate(playlistId, stationId)
+    return this.playlistsService.activate(playlistId, stationId, user.id)
   }
 
   @Get('playlists/:id/tracks')
-  getPlaylistTracks(@Param('id') id: string) {
-    return this.tracksService.getPlaylistTracks(id)
+  getPlaylistTracks(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.tracksService.getPlaylistTracks(id, user.id)
   }
 
   @Put('playlists/:id/tracks/reorder')
   reorderTracks(
-    @Param('id') id: string,
+    @Param('id', new ParseUUIDPipe()) id: string,
     @CurrentUser() user: { id: string },
     @Body() dto: ReorderPlaylistTracksDto,
   ) {
