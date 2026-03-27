@@ -1,0 +1,243 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  username     String   @unique
+  passwordHash String
+  avatar       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  lastSeenAt   DateTime @default(now())
+
+  ownedStations  Station[]       @relation("StationOwner")
+  stationMembers StationMember[]
+  uploadedTracks Track[]
+  chatMessages   ChatMessage[]
+  queueItems     QueueItem[]
+  refreshTokens  RefreshToken[]
+  sessions       ListenSession[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+// ─── Station ──────────────────────────────────────────────────────────────────
+
+model Station {
+  id          String            @id @default(uuid())
+  code        String            @unique
+  name        String
+  description String?
+  coverImage  String?
+  ownerId     String
+  owner       User              @relation("StationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  accessMode  String            @default("PRIVATE")
+  passwordHash String?
+  isLive      Boolean           @default(false)
+  currentTrackId String?
+  currentPosition Float         @default(0)
+  trackStartedAt DateTime?
+  isPaused    Boolean           @default(false)
+  pausedPosition Float          @default(0)
+  activePlaylistId String?
+  systemQueueMode String        @default("SEQUENTIAL")
+  crossfadeDuration Int         @default(3)
+  streamQuality String          @default("HIGH")
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  playlists    Playlist[]
+  members      StationMember[]
+  queue        QueueItem[]
+  chatMessages ChatMessage[]
+  invites      StationInvite[]
+  sessions     ListenSession[]
+  activityLogs ActivityLog[]
+
+  @@map("stations")
+}
+
+// ─── Playlist ─────────────────────────────────────────────────────────────────
+
+model Playlist {
+  id         String   @id @default(uuid())
+  name       String
+  stationId  String
+  station    Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  isDefault  Boolean  @default(false)
+  sortOrder  Int      @default(0)
+  coverImage String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tracks     PlaylistTrack[]
+
+  @@map("playlists")
+}
+
+// ─── Track ────────────────────────────────────────────────────────────────────
+
+model Track {
+  id           String   @id @default(uuid())
+  stationId    String
+  uploadedById String
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+  filename     String
+  originalPath String
+  highPath     String?
+  mediumPath   String?
+  lowPath      String?
+  coverPath    String?
+  title        String?
+  artist       String?
+  album        String?
+  year         Int?
+  genre        String?
+  duration     Float    @default(0)
+  fileSize     Int      @default(0)
+  bitrate      Int?
+  sampleRate   Int?
+  quality      String   @default("MEDIUM")
+  status       String   @default("PROCESSING")
+  waveformData String?
+  playCount    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  playlists  PlaylistTrack[]
+  queueItems QueueItem[]
+
+  @@map("tracks")
+}
+
+model PlaylistTrack {
+  id         String   @id @default(uuid())
+  playlistId String
+  playlist   Playlist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  trackId    String
+  track      Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  sortOrder  Int      @default(0)
+  addedById  String?
+  addedAt    DateTime @default(now())
+
+  @@unique([playlistId, trackId])
+  @@map("playlist_tracks")
+}
+
+// ─── Queue ────────────────────────────────────────────────────────────────────
+
+model QueueItem {
+  id        String   @id @default(uuid())
+  stationId String
+  station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  trackId   String
+  track     Track    @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  addedById String?
+  addedBy   User?    @relation(fields: [addedById], references: [id], onDelete: SetNull)
+  queueType String   @default("USER")
+  position  Int
+  status    String   @default("PENDING")
+  playedAt  DateTime?
+  createdAt DateTime @default(now())
+
+  @@map("queue_items")
+}
+
+// ─── Station Members ──────────────────────────────────────────────────────────
+
+model StationMember {
+  id          String   @id @default(uuid())
+  stationId   String
+  station     Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role        String   @default("GUEST")
+  permissions String   @default("[]")
+  joinedAt    DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([stationId, userId])
+  @@map("station_members")
+}
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  stationId String
+  station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  content   String
+  type      String   @default("TEXT")
+  metadata  String?
+  createdAt DateTime @default(now())
+
+  @@map("chat_messages")
+}
+
+// ─── Invites ──────────────────────────────────────────────────────────────────
+
+model StationInvite {
+  id          String    @id @default(uuid())
+  stationId   String
+  station     Station   @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  token       String    @unique
+  createdById String
+  maxUses     Int?
+  usedCount   Int       @default(0)
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@map("station_invites")
+}
+
+// ─── Sessions ─────────────────────────────────────────────────────────────────
+
+model ListenSession {
+  id               String    @id @default(uuid())
+  stationId        String
+  station          Station   @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  userId           String?
+  user             User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  fingerprint      String?
+  connectedAt      DateTime  @default(now())
+  disconnectedAt   DateTime?
+  totalListenTime  Int       @default(0)
+
+  @@map("listen_sessions")
+}
+
+// ─── Activity Log ─────────────────────────────────────────────────────────────
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  stationId String
+  station   Station  @relation(fields: [stationId], references: [id], onDelete: Cascade)
+  userId    String?
+  action    String
+  metadata  String?
+  createdAt DateTime @default(now())
+
+  @@map("activity_logs")
+}
