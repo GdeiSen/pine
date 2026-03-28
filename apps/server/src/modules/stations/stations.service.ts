@@ -24,7 +24,9 @@ export class StationsService {
     private prisma: PrismaService,
     private configService: ConfigService,
   ) {
-    this.storagePath = this.configService.get<string>('STORAGE_PATH', './storage')
+    this.storagePath = path.resolve(
+      this.configService.get<string>('STORAGE_PATH', './storage'),
+    )
   }
 
   async create(userId: string, dto: CreateStationDto) {
@@ -213,7 +215,43 @@ export class StationsService {
 
   async delete(stationId: string, userId: string) {
     await this.assertOwner(stationId, userId)
-    await this.prisma.station.delete({ where: { id: stationId } })
+
+    const tracks = await this.prisma.track.findMany({
+      where: { stationId },
+      select: {
+        id: true,
+        originalPath: true,
+        highPath: true,
+        mediumPath: true,
+        lowPath: true,
+        coverPath: true,
+      },
+    })
+
+    for (const track of tracks) {
+      const files = [
+        track.originalPath,
+        track.highPath,
+        track.mediumPath,
+        track.lowPath,
+        track.coverPath,
+      ].filter((value): value is string => Boolean(value))
+
+      for (const filePath of files) {
+        this.safeDeleteStorageFile(filePath)
+      }
+    }
+
+    const trackIds = tracks.map((t) => t.id)
+    await this.prisma.$transaction(async (tx) => {
+      if (trackIds.length) {
+        await tx.queueItem.deleteMany({ where: { trackId: { in: trackIds } } })
+        await tx.playlistTrack.deleteMany({ where: { trackId: { in: trackIds } } })
+      }
+      await tx.track.deleteMany({ where: { stationId } })
+      await tx.station.delete({ where: { id: stationId } })
+    })
+
     this.removeStationDirectory(stationId)
   }
 
@@ -261,6 +299,23 @@ export class StationsService {
     const dir = path.join(this.storagePath, 'stations', stationId)
     if (fs.existsSync(dir)) {
       fs.rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  private safeDeleteStorageFile(rawPath: string) {
+    try {
+      const resolved = path.resolve(rawPath)
+      if (
+        resolved !== this.storagePath &&
+        !resolved.startsWith(`${this.storagePath}${path.sep}`)
+      ) {
+        return
+      }
+      if (fs.existsSync(resolved)) {
+        fs.unlinkSync(resolved)
+      }
+    } catch {
+      // best effort cleanup
     }
   }
 

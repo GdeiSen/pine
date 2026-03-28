@@ -20,6 +20,39 @@ export function useStation(code: string, joinPassword?: string | null) {
   const playbackTokenRef = useRef(0)
   const socket = getSocket()
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+
+    const title = store.playback.currentTrack?.title?.trim()
+    const artist = store.playback.currentTrack?.artist?.trim()
+    const stationName = store.station?.name?.trim()
+
+    if (title) {
+      document.title = artist ? `${title} — ${artist} · PINE` : `${title} · PINE`
+      return
+    }
+
+    if (stationName) {
+      document.title = `${stationName} · PINE`
+      return
+    }
+
+    document.title = 'PINE'
+  }, [
+    store.playback.currentTrack?.id,
+    store.playback.currentTrack?.title,
+    store.playback.currentTrack?.artist,
+    store.station?.name,
+  ])
+
+  useEffect(() => {
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.title = 'PINE'
+      }
+    }
+  }, [])
+
   const getStreamUrl = (trackId: string) => {
     const quality = stationStore.getState().station?.streamQuality ?? 'HIGH'
     return `${API_URL}/tracks/${trackId}/stream?quality=${quality}`

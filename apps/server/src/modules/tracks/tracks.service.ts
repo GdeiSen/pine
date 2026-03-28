@@ -221,10 +221,9 @@ export class TracksService {
     }).catch(() => {})
   }
 
-  async getCover(trackId: string, res: any, userId?: string) {
+  async getCover(trackId: string, res: any, _userId?: string) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track || !track.coverPath) throw new NotFoundException('Cover not found')
-    await this.assertStationReadable(track.stationId, userId)
     const safeCoverPath = this.resolveSafeStorageFilePath(track.coverPath)
     if (!safeCoverPath || !fs.existsSync(safeCoverPath)) {
       throw new NotFoundException('Cover file not found')

@@ -51,6 +51,34 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   const trackIdRef = useRef<string | null>(null)
   const volume = useAudioStore((s) => s.volume)
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+
+    const title = state.currentTrack?.title?.trim()
+    const artist = state.currentTrack?.artist?.trim()
+    const stationName = state.name?.trim()
+
+    if (title) {
+      document.title = artist ? `${title} — ${artist} · PINE` : `${title} · PINE`
+      return
+    }
+
+    if (stationName) {
+      document.title = `${stationName} · PINE`
+      return
+    }
+
+    document.title = 'PINE'
+  }, [state.currentTrack?.id, state.currentTrack?.title, state.currentTrack?.artist, state.name])
+
+  useEffect(() => {
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.title = 'PINE'
+      }
+    }
+  }, [])
+
   const hasTrackSource = useCallback((audio: HTMLAudioElement, trackId: string) => {
     return audio.currentSrc.includes(`/tracks/${trackId}/stream`)
   }, [])

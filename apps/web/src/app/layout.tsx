@@ -4,8 +4,11 @@ import { QueryProvider } from '@/components/providers/query-provider'
 import '@/styles/globals.css'
 
 export const metadata: Metadata = {
-  title: 'Web Radio — Совместное прослушивание',
-  description: 'Создайте свою радиостанцию и слушайте музыку вместе',
+  title: {
+    default: 'PINE',
+    template: '%s · PINE',
+  },
+  description: 'PINE — создавайте свои радиостанции и слушайте музыку вместе',
   manifest: '/manifest.json',
   themeColor: '#6366f1',
 }
