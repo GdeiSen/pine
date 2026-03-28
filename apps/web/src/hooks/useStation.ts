@@ -13,8 +13,6 @@ import { WS_EVENTS, SYNC_THRESHOLD_SECONDS } from '@web-radio/shared'
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api'
 const TIME_SYNC_INTERVAL_MS = 15_000
 const TIME_SYNC_EMA_ALPHA = 0.2
-const SOFT_SYNC_DEADBAND_SECONDS = 0.15
-const SOFT_SYNC_RATE_LIMIT = 0.03
 const HARD_SYNC_DRIFT_SECONDS = Math.max(SYNC_THRESHOLD_SECONDS * 2, 4)
 const HTML5_POOL_SIZE = 16
 
@@ -318,10 +316,9 @@ export function useStation(code: string, joinPassword?: string | null) {
           howl.seek(targetPosition, soundId)
           howl.rate(1, soundId)
           getState().setPlayback({ currentPosition: targetPosition })
-        } else if (syncType === 'heartbeat') {
-          const correction = Math.max(-SOFT_SYNC_RATE_LIMIT, Math.min(SOFT_SYNC_RATE_LIMIT, -diff * 0.05))
-          const nextRate = absDiff <= SOFT_SYNC_DEADBAND_SECONDS ? 1 : 1 + correction
-          howl.rate(nextRate, soundId)
+        } else if (soundId !== undefined) {
+          // Keep pitch/timbre stable on heartbeat syncs: no playbackRate nudging.
+          howl.rate(1, soundId)
         }
 
         // Do not auto-create additional sound instances here.
