@@ -37,6 +37,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { formatDuration, formatFileSize } from "@/lib/utils";
 import api from "@/lib/api";
+import { useAuthStore } from "@/stores/auth.store";
 
 type FolderColorKey = "orange" | "blue" | "green" | "violet" | "rose" | "amber";
 
@@ -296,6 +297,7 @@ export function AddTracksPanel({
   onActivePlaylistChange,
 }: AddTracksPanelProps) {
   const queryClient = useQueryClient();
+  const refreshUser = useAuthStore((s) => s.refreshUser);
   const [isUploadMode, setIsUploadMode] = useState(false);
   const [uploadFiles, setUploadFiles] = useState<UploadFile[]>([]);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -405,6 +407,7 @@ export function AddTracksPanel({
       queryClient.invalidateQueries({
         queryKey: ["playlist-tracks", vars.playlistId],
       });
+      refreshUser().catch(() => {});
 
       if (vars.playlistId === activePlaylistId && vars.fallbackId) {
         await activateFolderMutation.mutateAsync(vars.fallbackId);
@@ -440,6 +443,7 @@ export function AddTracksPanel({
         queryKey: ["playlist-tracks", selectedPlaylist?.id],
       });
       queryClient.invalidateQueries({ queryKey: ["playlists", stationId] });
+      refreshUser().catch(() => {});
     },
   });
 
@@ -616,6 +620,7 @@ export function AddTracksPanel({
         queryKey: ["playlist-tracks", selectedPlaylist.id],
       });
       queryClient.invalidateQueries({ queryKey: ["playlists", stationId] });
+      refreshUser().catch(() => {});
     } catch (err: any) {
       const msg = err?.response?.data?.message ?? "Upload failed";
       setUploadFiles((prev) =>
