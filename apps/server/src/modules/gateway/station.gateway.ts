@@ -13,6 +13,8 @@ import { Server, Socket } from 'socket.io'
 import { JwtService } from '@nestjs/jwt'
 import { ConfigService } from '@nestjs/config'
 import { Logger } from '@nestjs/common'
+import * as fs from 'fs'
+import * as path from 'path'
 import { PrismaService } from '../../prisma/prisma.service'
 import { QueueService } from '../queue/queue.service'
 import { ChatService } from '../chat/chat.service'
@@ -86,6 +88,7 @@ export class StationGateway
   private trackEndTimers = new Map<string, NodeJS.Timeout>()
   // Sequential lock per station for playback mutations
   private playbackLocks = new Map<string, Promise<unknown>>()
+  private readonly storagePath: string
 
   constructor(
     private jwtService: JwtService,
@@ -95,7 +98,11 @@ export class StationGateway
     private chatService: ChatService,
     private membersService: MembersService,
     private stationsService: StationsService,
-  ) {}
+  ) {
+    this.storagePath = path.resolve(
+      this.configService.get<string>('STORAGE_PATH', './storage'),
+    )
+  }
 
   afterInit() {
     this.logger.log('WebSocket Gateway initialized')
@@ -322,7 +329,15 @@ export class StationGateway
 
             // Go to previous track
             const prev = state.history.pop()!
-            await this.playTrack(client.stationId!, prev.trackId, prev.queueItemId, false)
+            const started = await this.playTrack(
+              client.stationId!,
+              prev.trackId,
+              prev.queueItemId,
+              false,
+            )
+            if (!started) {
+              await this.handleSkipUnsafe(stationId)
+            }
             return
           }
 
@@ -337,12 +352,15 @@ export class StationGateway
                 if (state.currentQueueItemId) {
                   await this.queueService.requeuePlayingItem(state.currentQueueItemId)
                 }
-                await this.playTrack(
+                const started = await this.playTrack(
                   stationId,
                   previousSystem.trackId,
                   previousSystem.queueItemId,
                   false,
                 )
+                if (!started) {
+                  await this.handleSkipUnsafe(stationId)
+                }
                 return
               }
             }
@@ -620,42 +638,46 @@ export class StationGateway
 
     // Mark current item as played (history is saved in playTrack)
     if (state.currentQueueItemId) {
-      await this.queueService.markPlayed(state.currentQueueItemId)
+      await this.queueService.markPlayed(state.currentQueueItemId).catch(() => undefined)
     }
 
-    // Get next track
-    const next = await this.queueService.getNextTrack(stationId)
-
-    if (!next) {
-      // Rebuild system queue if empty
-      await this.queueService.rebuildSystemQueue(stationId)
-      const retryNext = await this.queueService.getNextTrack(stationId)
-
-      if (!retryNext) {
-        // Nothing to play
-        state.currentTrackId = null
-        state.currentQueueItemId = null
-        state.currentQueueType = null
-        state.currentTrackDuration = 0
-        state.trackStartedAt = null
-        state.isPaused = false
-
-        await this.prisma.station.update({
-          where: { id: stationId },
-          data: { currentTrackId: null, currentPosition: 0 },
-        })
-
-        this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, { track: null })
-        return
+    let rebuiltSystemQueue = false
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const next = await this.queueService.getNextTrack(stationId)
+      if (!next) {
+        if (rebuiltSystemQueue) break
+        await this.queueService.rebuildSystemQueue(stationId)
+        rebuiltSystemQueue = true
+        continue
       }
 
-      await this.playTrack(stationId, retryNext.trackId, retryNext.queueItemId)
-    } else {
-      await this.playTrack(stationId, next.trackId, next.queueItemId)
+      const started = await this.playTrack(stationId, next.trackId, next.queueItemId)
+      if (started) return
     }
+
+    // Nothing playable left
+    state.currentTrackId = null
+    state.currentQueueItemId = null
+    state.currentQueueType = null
+    state.currentTrackDuration = 0
+    state.trackStartedAt = null
+    state.isPaused = false
+    state.pausedPosition = 0
+
+    await this.prisma.station.update({
+      where: { id: stationId },
+      data: { currentTrackId: null, currentPosition: 0, trackStartedAt: null, isPaused: false },
+    })
+
+    this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, { track: null })
   }
 
-  private async playTrack(stationId: string, trackId: string, queueItemId: string, addToHistory = true) {
+  private async playTrack(
+    stationId: string,
+    trackId: string,
+    queueItemId: string,
+    addToHistory = true,
+  ): Promise<boolean> {
     const state = this.getOrCreatePlaybackState(stationId)
     const queueItem = await this.prisma.queueItem.findUnique({
       where: { id: queueItemId },
@@ -668,7 +690,18 @@ export class StationGateway
       },
     })
 
-    if (!track) return
+    if (!track) {
+      await this.queueService.removeFromQueue(stationId, queueItemId).catch(() => undefined)
+      return false
+    }
+
+    if (!this.isTrackFileAvailable(track.originalPath)) {
+      this.logger.warn(
+        `Skipping broken track ${track.id} in station ${stationId}: file not found at ${track.originalPath}`,
+      )
+      await this.cleanupBrokenTrack(stationId, track.id, queueItemId)
+      return false
+    }
 
     await this.queueService.markPlaying(queueItemId)
 
@@ -716,6 +749,7 @@ export class StationGateway
       currentQueueType: state.currentQueueType,
       queue,
     })
+    return true
   }
 
   private startSyncInterval(stationId: string) {
@@ -866,6 +900,42 @@ export class StationGateway
       if (meta?.userId) userIds.add(meta.userId)
     }
     return userIds
+  }
+
+  private isTrackFileAvailable(filePath?: string | null) {
+    if (!filePath) return false
+    const resolved = path.resolve(filePath)
+    if (
+      resolved !== this.storagePath &&
+      !resolved.startsWith(`${this.storagePath}${path.sep}`)
+    ) {
+      return false
+    }
+    return fs.existsSync(resolved)
+  }
+
+  private async cleanupBrokenTrack(
+    stationId: string,
+    trackId: string,
+    queueItemId: string,
+  ) {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.queueItem.deleteMany({
+        where: { OR: [{ id: queueItemId }, { trackId, stationId }] },
+      })
+      await tx.playlistTrack.deleteMany({ where: { trackId } })
+      await tx.track.deleteMany({ where: { id: trackId } })
+      await tx.station.updateMany({
+        where: { id: stationId, currentTrackId: trackId },
+        data: {
+          currentTrackId: null,
+          currentPosition: 0,
+          trackStartedAt: null,
+          isPaused: false,
+          pausedPosition: 0,
+        },
+      })
+    })
   }
 
   // Public method for broadcasting from HTTP controllers

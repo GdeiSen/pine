@@ -27,12 +27,21 @@ export class QueueService {
       orderBy: [{ queueType: 'asc' }, { position: 'asc' }],
     })
 
-    const sorted = items.sort((a, b) => {
+    const brokenItems = items.filter((item) => !item.track).map((item) => item.id)
+    if (brokenItems.length > 0) {
+      await this.prisma.queueItem.deleteMany({
+        where: { id: { in: brokenItems } },
+      })
+    }
+
+    const sorted = items
+      .filter((item) => !!item.track)
+      .sort((a, b) => {
       if (a.queueType === b.queueType) return a.position - b.position
       return a.queueType === QueueType.USER ? -1 : 1
     })
 
-    return sorted.map(this.formatQueueItem)
+    return sorted.map(this.formatQueueItem).filter((item) => !!item)
   }
 
   async addToQueue(stationId: string, trackId: string, userId: string, options?: AddToQueueOptions) {
@@ -142,24 +151,39 @@ export class QueueService {
   }
 
   async getNextTrack(stationId: string): Promise<{ trackId: string; queueItemId: string } | null> {
-    // First check user queue
-    const userItem = await this.prisma.queueItem.findFirst({
-      where: { stationId, queueType: QueueType.USER, status: QueueItemStatus.PENDING },
-      orderBy: { position: 'asc' },
-    })
+    // self-healing lookup: removes dangling queue items instead of returning broken IDs
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const userItem = await this.prisma.queueItem.findFirst({
+        where: { stationId, queueType: QueueType.USER, status: QueueItemStatus.PENDING },
+        orderBy: { position: 'asc' },
+      })
 
-    if (userItem) {
-      return { trackId: userItem.trackId, queueItemId: userItem.id }
-    }
+      if (userItem) {
+        const trackExists = await this.prisma.track.findFirst({
+          where: { id: userItem.trackId, stationId },
+          select: { id: true },
+        })
+        if (trackExists) return { trackId: userItem.trackId, queueItemId: userItem.id }
+        await this.prisma.queueItem.deleteMany({ where: { id: userItem.id } })
+        continue
+      }
 
-    // Then system queue
-    const systemItem = await this.prisma.queueItem.findFirst({
-      where: { stationId, queueType: QueueType.SYSTEM, status: QueueItemStatus.PENDING },
-      orderBy: { position: 'asc' },
-    })
+      const systemItem = await this.prisma.queueItem.findFirst({
+        where: { stationId, queueType: QueueType.SYSTEM, status: QueueItemStatus.PENDING },
+        orderBy: { position: 'asc' },
+      })
 
-    if (systemItem) {
-      return { trackId: systemItem.trackId, queueItemId: systemItem.id }
+      if (systemItem) {
+        const trackExists = await this.prisma.track.findFirst({
+          where: { id: systemItem.trackId, stationId },
+          select: { id: true },
+        })
+        if (trackExists) return { trackId: systemItem.trackId, queueItemId: systemItem.id }
+        await this.prisma.queueItem.deleteMany({ where: { id: systemItem.id } })
+        continue
+      }
+
+      return null
     }
 
     return null
@@ -301,6 +325,7 @@ export class QueueService {
   }
 
   private formatQueueItem(item: any) {
+    if (!item?.track) return null
     return {
       id: item.id,
       stationId: item.stationId,
