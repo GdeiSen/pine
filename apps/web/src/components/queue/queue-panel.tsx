@@ -68,7 +68,11 @@ function SortableQueueItem({
         <GripVertical size={14} />
       </button>
 
-      <div className="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 bg-[--bg-subtle]">
+      <div
+        className={`w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 ${
+          coverUrl ? 'bg-[--bg-subtle]' : 'bg-gray-500/20'
+        }`}
+      >
         {coverUrl ? (
           <img src={coverUrl} alt="" className="w-full h-full object-cover" />
         ) : (

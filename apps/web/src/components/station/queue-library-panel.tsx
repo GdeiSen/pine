@@ -366,7 +366,11 @@ function SortableQueueRow({
         <GripVertical size={14} />
       </button>
 
-      <div className="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 bg-[--bg-subtle]">
+      <div
+        className={`w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 ${
+          coverUrl ? "bg-[--bg-subtle]" : "bg-gray-500/20"
+        }`}
+      >
         {coverUrl ? (
           <img src={coverUrl} alt="" className="w-full h-full object-cover" />
         ) : (
@@ -543,7 +547,7 @@ function SortableLibraryRow({
         transition,
         opacity: isDragging ? 0.5 : 1,
       }}
-      className="relative flex items-center gap-2 md:gap-3 p-1.5 md:p-2.5 rounded-xl hover:bg-[--bg-subtle] transition-colors"
+      className="relative flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2.5 rounded-xl hover:bg-[--bg-subtle] transition-colors"
     >
       <span className="w-5 flex items-center justify-end">
         <span
@@ -555,16 +559,22 @@ function SortableLibraryRow({
         </span>
       </span>
 
-      <button
-        {...attributes}
-        {...listeners}
-        disabled={!canReorder}
-        className="text-[--text-muted] hover:text-[--text-secondary] cursor-grab active:cursor-grabbing disabled:opacity-0 disabled:pointer-events-none"
-      >
-        <GripVertical size={14} />
-      </button>
+      {canReorder && (
+        <button
+          {...attributes}
+          {...listeners}
+          disabled={!canReorder}
+          className="text-[--text-muted] hover:text-[--text-secondary] cursor-grab active:cursor-grabbing"
+        >
+          <GripVertical size={14} />
+        </button>
+      )}
 
-      <div className="w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 bg-[--bg-subtle]">
+      <div
+        className={`w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 ${
+          coverUrl ? "bg-[--bg-subtle]" : "bg-gray-500/20"
+        }`}
+      >
         {coverUrl ? (
           <img src={coverUrl} alt="" className="w-full h-full object-cover" />
         ) : (

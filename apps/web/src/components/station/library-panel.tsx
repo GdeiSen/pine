@@ -179,7 +179,14 @@ function PlaylistRow({
                           <span className="text-[11px] text-[--text-muted] w-4 text-right flex-shrink-0 tabular-nums">
                             {i + 1}
                           </span>
-                          <div className="w-7 h-7 rounded-lg overflow-hidden flex-shrink-0" style={{ background: 'var(--bg-inset)' }}>
+                          <div
+                            className="w-7 h-7 rounded-lg overflow-hidden flex-shrink-0"
+                            style={{
+                              background: coverUrl
+                                ? "var(--bg-inset)"
+                                : "rgba(128, 128, 128, 0.2)",
+                            }}
+                          >
                             {coverUrl ? (
                               <img src={coverUrl} alt="" className="w-full h-full object-cover" />
                             ) : (

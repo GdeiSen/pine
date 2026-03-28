@@ -100,10 +100,13 @@ export function PhoneContainer({
             ) : (
               <div
                 className="w-full h-full flex items-center justify-center"
-                style={{ background: `linear-gradient(135deg, ${accentColor}20, ${accentColor}05)` }}
+                style={{
+                  background:
+                    "linear-gradient(135deg, rgba(128, 128, 128, 0.22), rgba(128, 128, 128, 0.08))",
+                }}
               >
                 <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
-                  stroke={accentColor} strokeWidth="1.2" opacity="0.4">
+                  stroke="currentColor" strokeWidth="1.2" opacity="0.4" className="text-[--text-muted]">
                   <path d="M9 18V5l12-2v13" />
                   <circle cx="6" cy="18" r="3" />
                   <circle cx="18" cy="16" r="3" />

@@ -4,12 +4,15 @@ import { useRef, useEffect, useCallback } from 'react'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PX_PER_SEC   = 44      // pixels per second of audio
-const INDICATOR_X  = 88      // fixed X of the red playhead from left
+const INDICATOR_X_RATIO = 0.5 // playhead X ratio inside ruler (0..1)
+const HIGHLIGHT_RADIUS_PX = 120 // distance around playhead for orange tint
+const SUB_TICK_STEP_SEC = 0.2 // sub-second mini ticks (200ms)
 const RULER_H      = 64      // total canvas height in CSS px
 const LABEL_BASELINE_Y = 39  // y of ruler time text baseline
 const LABEL_BOTTOM_Y   = 42  // approx lower edge of ruler time text
 const TICK_MAJOR_H     = LABEL_BOTTOM_Y
 const TICK_MINOR_H     = LABEL_BOTTOM_Y - 14
+const TICK_MICRO_H     = LABEL_BOTTOM_Y - 22
 const LABEL_OFFSET = 4       // gap between tick right edge and label
 const DEAD_ZONE    = 12      // px dead zone before velocity starts
 const MAX_VEL      = 120     // max seconds-per-second while dragging
@@ -21,7 +24,18 @@ const FAR_ACCEL    = 0.32    // additional acceleration when cursor is far away
 function fmtTime(sec: number): string {
   const s = Math.max(0, Math.floor(sec))
   const m = Math.floor(s / 60)
-  return `${String(m).padStart(2, '0')}"${String(s % 60).padStart(2, '0')}'`
+  return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+}
+
+type Rgba = { r: number; g: number; b: number; a: number }
+
+function mixRgba(from: Rgba, to: Rgba, t: number): string {
+  const k = Math.max(0, Math.min(1, t))
+  const r = Math.round(from.r + (to.r - from.r) * k)
+  const g = Math.round(from.g + (to.g - from.g) * k)
+  const b = Math.round(from.b + (to.b - from.b) * k)
+  const a = from.a + (to.a - from.a) * k
+  return `rgba(${r},${g},${b},${a.toFixed(3)})`
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -124,6 +138,7 @@ export function RulerProgressBar({
     const dpr = dprRef.current
     const W   = canvas.width  / dpr
     const H   = RULER_H
+    const indicatorX = Math.round(W * INDICATOR_X_RATIO)
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, W, H)
@@ -132,33 +147,75 @@ export function RulerProgressBar({
     const { duration } = propsRef.current
     const isDark   = document.documentElement.classList.contains('dark')
 
-    const colTick  = isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.50)'
-    const colMinor = isDark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'
-    const colLabel = isDark ? 'rgba(255,255,255,0.32)' : 'rgba(0,0,0,0.32)'
+    const tickMajorBase: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.55 }
+      : { r: 0, g: 0, b: 0, a: 0.50 }
+    const tickMinorBase: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.18 }
+      : { r: 0, g: 0, b: 0, a: 0.18 }
+    const tickMicroBase: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.10 }
+      : { r: 0, g: 0, b: 0, a: 0.10 }
+    const labelBase: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.32 }
+      : { r: 0, g: 0, b: 0, a: 0.32 }
+    const focusMajor: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.92 }
+      : { r: 0, g: 0, b: 0, a: 0.90 }
+    const focusMinor: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.68 }
+      : { r: 0, g: 0, b: 0, a: 0.58 }
+    const focusMicro: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.36 }
+      : { r: 0, g: 0, b: 0, a: 0.30 }
+    const focusLabel: Rgba = isDark
+      ? { r: 255, g: 255, b: 255, a: 0.90 }
+      : { r: 0, g: 0, b: 0, a: 0.86 }
 
     // Time range visible in the canvas
-    const visStart = pos - INDICATOR_X / PX_PER_SEC
-    const visEnd   = pos + (W - INDICATOR_X) / PX_PER_SEC
+    const visStart = pos - indicatorX / PX_PER_SEC
+    const visEnd   = pos + (W - indicatorX) / PX_PER_SEC
     const first    = Math.floor(visStart) - 1
     const last     = Math.ceil(visEnd)  + 1
 
     ctx.font = '10px ui-monospace, "SF Mono", monospace'
 
+    // Micro sub-second ticks (every 200ms), excluding full-second marks.
+    const subFirst = Math.floor(visStart / SUB_TICK_STEP_SEC) - 1
+    const subLast = Math.ceil(visEnd / SUB_TICK_STEP_SEC) + 1
+    for (let i = subFirst; i <= subLast; i++) {
+      const t = i * SUB_TICK_STEP_SEC
+      if (t < 0) continue
+      if (duration > 0 && t > duration + 2) continue
+      if (Math.abs(t - Math.round(t)) < 1e-6) continue
+
+      const x = indicatorX + (t - pos) * PX_PER_SEC
+      const dist = Math.abs(x - indicatorX)
+      const glow = Math.max(0, 1 - dist / HIGHLIGHT_RADIUS_PX)
+
+      ctx.fillStyle = mixRgba(tickMicroBase, focusMicro, glow)
+      ctx.fillRect(Math.round(x) - 0.5, 0, 1, TICK_MICRO_H)
+    }
+
     for (let t = first; t <= last; t++) {
       if (t < 0) continue
       if (duration > 0 && t > duration + 2) continue
 
-      const x     = INDICATOR_X + (t - pos) * PX_PER_SEC
+      const x     = indicatorX + (t - pos) * PX_PER_SEC
       const major = t % 5 === 0
+      const dist = Math.abs(x - indicatorX)
+      const glow = Math.max(0, 1 - dist / HIGHLIGHT_RADIUS_PX)
 
       // Tick bar
-      ctx.fillStyle = major ? colTick : colMinor
+      ctx.fillStyle = major
+        ? mixRgba(tickMajorBase, focusMajor, glow)
+        : mixRgba(tickMinorBase, focusMinor, glow)
       const h = major ? TICK_MAJOR_H : TICK_MINOR_H
       ctx.fillRect(Math.round(x) - (major ? 0.75 : 0.5), 0, major ? 1.5 : 1, h)
 
       // Time label to the RIGHT of the major tick
       if (major) {
-        ctx.fillStyle = colLabel
+        ctx.fillStyle = mixRgba(labelBase, focusLabel, glow)
         ctx.textAlign = 'left'
         ctx.fillText(fmtTime(t), x + LABEL_OFFSET, LABEL_BASELINE_Y)
       }
@@ -171,15 +228,15 @@ export function RulerProgressBar({
     ctx.shadowColor = 'rgba(232,68,15,0.45)'
     ctx.shadowBlur  = 7
     ctx.fillStyle   = red
-    ctx.fillRect(INDICATOR_X - 1, 0, 2, H - 2)
+    ctx.fillRect(indicatorX - 1, 0, 2, H - 16)
     ctx.restore()
 
     // Current time label — right of playhead, at bottom
     const timeStr = fmtTime(smoothRef.current)
     ctx.font      = 'bold 10px ui-monospace, "SF Mono", monospace'
     ctx.fillStyle = red
-    ctx.textAlign = 'left'
-    ctx.fillText(timeStr, INDICATOR_X + 5, H - 3)
+    ctx.textAlign = 'center'
+    ctx.fillText(timeStr, indicatorX, H - 3)
 
     // Remaining time label is rendered as an HTML overlay above gradient effects.
     if (duration > 0) {
