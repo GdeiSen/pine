@@ -142,14 +142,14 @@ function QueueTrackMenu({
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95, y: -4 }}
       transition={{ duration: 0.12 }}
-      className="absolute right-0 top-7 z-30 min-w-[140px] rounded-xl overflow-hidden"
+      className="absolute right-0 top-[calc(100%+4px)] z-30 min-w-[140px] rounded-xl overflow-hidden p-1"
       style={{
         boxShadow: "var(--shadow-lg)",
         background: "var(--bg-elevated)",
       }}
     >
       <button
-        className="flex items-center gap-2.5 w-full px-3 py-2.5 text-sm text-red-400 hover:bg-[--bg-subtle]"
+        className="flex items-center gap-2.5 w-full rounded-lg px-3 py-2.5 text-sm text-red-400 hover:bg-[--bg-subtle]"
         onClick={() => {
           onRemove();
           onClose();
@@ -458,14 +458,14 @@ function LibraryTrackMenu({
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95, y: -4 }}
       transition={{ duration: 0.12 }}
-      className="absolute right-0 top-7 z-30 min-w-[190px] rounded-xl overflow-hidden"
+      className="absolute right-0 top-[calc(100%+4px)] z-30 min-w-[190px] rounded-xl overflow-hidden p-1"
       style={{
         boxShadow: "var(--shadow-lg)",
         background: "var(--bg-elevated)",
       }}
     >
       <button
-        className="flex items-center gap-2.5 w-full px-3 py-2.5 text-sm text-[--text-primary] hover:bg-[--bg-subtle]"
+        className="flex items-center gap-2.5 w-full rounded-lg px-3 py-2.5 text-sm text-[--text-primary] hover:bg-[--bg-subtle]"
         onClick={() => {
           onAction("end");
           onClose();
@@ -475,7 +475,7 @@ function LibraryTrackMenu({
         Add to end
       </button>
       <button
-        className="flex items-center gap-2.5 w-full px-3 py-2.5 text-sm text-[--text-primary] hover:bg-[--bg-subtle]"
+        className="flex items-center gap-2.5 w-full rounded-lg px-3 py-2.5 text-sm text-[--text-primary] hover:bg-[--bg-subtle]"
         onClick={() => {
           onAction("next");
           onClose();
@@ -485,7 +485,7 @@ function LibraryTrackMenu({
         Play next
       </button>
       <button
-        className="flex items-center gap-2.5 w-full px-3 py-2.5 text-sm text-[--text-primary] hover:bg-[--bg-subtle]"
+        className="flex items-center gap-2.5 w-full rounded-lg px-3 py-2.5 text-sm text-[--text-primary] hover:bg-[--bg-subtle]"
         onClick={() => {
           onAction("now");
           onClose();

@@ -35,6 +35,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmModal } from "@/components/ui/confirm-modal";
 import { formatDuration, formatFileSize } from "@/lib/utils";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/auth.store";
@@ -311,6 +312,7 @@ export function AddTracksPanel({
   const [orderedTracks, setOrderedTracks] = useState<PlaylistTrack[]>([]);
   const [editingTrackId, setEditingTrackId] = useState<string | null>(null);
   const [editingTrackTitle, setEditingTrackTitle] = useState("");
+  const [trackToDelete, setTrackToDelete] = useState<PlaylistTrack | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -473,10 +475,7 @@ export function AddTracksPanel({
   });
 
   const handleDeleteTrack = (track: PlaylistTrack) => {
-    const label = track.title ?? track.filename;
-    const ok = window.confirm(`Удалить трек "${label}"?`);
-    if (!ok) return;
-    deleteTrackMutation.mutate(track.id);
+    setTrackToDelete(track);
   };
 
   const startTrackEdit = (track: PlaylistTrack) => {
@@ -746,21 +745,21 @@ export function AddTracksPanel({
           <motion.section
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="max-w-3xl"
+            className="max-w-3xl mx-auto min-h-full flex flex-col justify-center"
           >
-            <div>
-              <div className="flex items-center gap-2 mb-6">
+            <div className="text-center">
+              <div className="flex items-center justify-center gap-2 mb-6">
                 <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
                   Publish tracks
                 </p>
               </div>
-              <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
+              <p className="-mt-3 mb-5 text-sm text-[--text-muted] text-center">
                 Upload files to publish new tracks in this folder. Supported
                 formats: MP3, FLAC, WAV, AAC.
               </p>
             </div>
 
-            <div className="mt-5">
+            <div className="mt-5 flex justify-center">
               <input
                 ref={uploadInputRef}
                 type="file"
@@ -923,6 +922,25 @@ export function AddTracksPanel({
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        open={!!trackToDelete}
+        title="Delete track?"
+        description={
+          trackToDelete
+            ? `Track "${trackToDelete.title ?? trackToDelete.filename}" will be removed permanently.`
+            : ""
+        }
+        confirmLabel="Delete track"
+        loading={deleteTrackMutation.isPending}
+        onCancel={() => setTrackToDelete(null)}
+        onConfirm={() => {
+          if (!trackToDelete) return;
+          deleteTrackMutation.mutate(trackToDelete.id, {
+            onSettled: () => setTrackToDelete(null),
+          });
+        }}
+      />
     </div>
   );
 }

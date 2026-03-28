@@ -12,6 +12,7 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { ArrowLeft, Lock, Hash, Globe2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConfirmModal } from "@/components/ui/confirm-modal";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/auth.store";
 import { formatFileSize, getAvatarFallback } from "@/lib/utils";
@@ -158,6 +159,7 @@ export function SettingsPanel({
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [error, setError] = useState("");
 
   const availableStorageLabel = user?.storage
@@ -277,18 +279,16 @@ export function SettingsPanel({
 
   const handleDeleteStation = async () => {
     if (!station.id || deleting) return;
-    const confirmed = window.confirm(
-      `Delete station "${station.name}" permanently? This cannot be undone.`,
-    );
-    if (!confirmed) return;
 
     setDeleting(true);
     setError("");
     try {
       await api.delete(`/stations/${station.id}`);
       router.push("/dashboard");
+      return true;
     } catch (err: any) {
       setError(err?.response?.data?.message ?? "Failed to delete station");
+      return false;
     } finally {
       setDeleting(false);
     }
@@ -599,7 +599,7 @@ export function SettingsPanel({
             <Button
               variant="danger"
               className="!pl-0 pr-4 justify-start !bg-transparent hover:!bg-transparent"
-              onClick={handleDeleteStation}
+              onClick={() => setDeleteModalOpen(true)}
               isLoading={deleting}
             >
               <X size={14} />
@@ -631,6 +631,19 @@ export function SettingsPanel({
           </Button>
         </div>
       </div>
+
+      <ConfirmModal
+        open={deleteModalOpen}
+        title="Delete station?"
+        description={`Station "${station.name}" will be removed permanently with its queue, tracks and settings.`}
+        confirmLabel="Delete station"
+        loading={deleting}
+        onCancel={() => setDeleteModalOpen(false)}
+        onConfirm={async () => {
+          const success = await handleDeleteStation();
+          if (success) setDeleteModalOpen(false);
+        }}
+      />
     </div>
   );
 }
