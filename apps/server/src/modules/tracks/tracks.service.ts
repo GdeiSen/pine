@@ -21,6 +21,7 @@ import {
 export class TracksService {
   private storagePath: string
   private readonly logger = new Logger(TracksService.name)
+  private readonly coverExtractionFailed = new Set<string>()
 
   constructor(
     private prisma: PrismaService,
@@ -257,7 +258,10 @@ export class TracksService {
       throw new NotFoundException('Cover file not found')
     }
 
-    res.set({ 'Content-Type': 'image/webp', 'Cache-Control': 'public, max-age=86400' })
+    res.set({
+      'Content-Type': this.getImageMimeType(safeCoverPath),
+      'Cache-Control': 'public, max-age=86400',
+    })
     fs.createReadStream(safeCoverPath).pipe(res)
   }
 
@@ -337,8 +341,11 @@ export class TracksService {
     originalPath: string
     coverPath?: string | null
   }): Promise<string | null> {
+    if (this.coverExtractionFailed.has(track.id)) return null
+
     const existingCoverPath = this.resolveSafeStorageFilePath(track.coverPath)
     if (existingCoverPath && fs.existsSync(existingCoverPath)) {
+      this.coverExtractionFailed.delete(track.id)
       return existingCoverPath
     }
 
@@ -351,23 +358,32 @@ export class TracksService {
       const picture = metadata?.common?.picture?.[0]
       if (!picture?.data) return null
 
-      return await this.saveCover(track.id, track.stationId, picture)
+      const saved = await this.saveCover(track.id, track.stationId, picture)
+      if (saved) this.coverExtractionFailed.delete(track.id)
+      else this.coverExtractionFailed.add(track.id)
+      return saved
     } catch (error: any) {
       this.logger.warn(
         `Cover extraction failed for track ${track.id}: ${error?.message ?? String(error)}`,
       )
+      this.coverExtractionFailed.add(track.id)
       return null
     }
   }
 
-  private async saveCover(trackId: string, stationId: string, picture: any): Promise<string | null> {
+  private async saveCover(
+    trackId: string,
+    stationId: string,
+    picture: { data: Uint8Array | Buffer; format?: string },
+  ): Promise<string | null> {
     try {
       const sharp = (await import('sharp')).default
       const coverDir = path.join(this.storagePath, 'stations', stationId, 'covers')
       fs.mkdirSync(coverDir, { recursive: true })
+      const coverData = Buffer.from(picture.data)
 
       const coverPath = path.join(coverDir, `${trackId}.webp`)
-      await sharp(picture.data)
+      await sharp(coverData)
         .rotate()
         .resize(500, 500, { fit: 'cover' })
         .webp({ quality: 85 })
@@ -379,8 +395,32 @@ export class TracksService {
       })
       return coverPath
     } catch (_e) {
-      this.logger.warn(`Cover save failed for track ${trackId}`)
-      return null
+      this.logger.warn(
+        `Cover save failed for track ${trackId}, trying raw fallback: ${
+          _e instanceof Error ? _e.message : String(_e)
+        }`,
+      )
+      try {
+        const coverDir = path.join(this.storagePath, 'stations', stationId, 'covers')
+        fs.mkdirSync(coverDir, { recursive: true })
+
+        const ext = this.getImageExtension(picture?.format)
+        const fallbackPath = path.join(coverDir, `${trackId}${ext}`)
+        fs.writeFileSync(fallbackPath, Buffer.from(picture.data))
+
+        await this.prisma.track.update({
+          where: { id: trackId },
+          data: { coverPath: fallbackPath },
+        })
+        return fallbackPath
+      } catch (fallbackError: any) {
+        this.logger.warn(
+          `Raw cover fallback failed for track ${trackId}: ${
+            fallbackError?.message ?? String(fallbackError)
+          }`,
+        )
+        return null
+      }
     }
   }
 
@@ -395,6 +435,28 @@ export class TracksService {
       '.m4a': 'audio/mp4',
     }
     return map[ext] ?? 'audio/mpeg'
+  }
+
+  private getImageExtension(format?: string | null): string {
+    const f = String(format ?? '').toLowerCase()
+    if (f.includes('png')) return '.png'
+    if (f.includes('webp')) return '.webp'
+    if (f.includes('gif')) return '.gif'
+    if (f.includes('bmp')) return '.bmp'
+    return '.jpg'
+  }
+
+  private getImageMimeType(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase()
+    const map: Record<string, string> = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.gif': 'image/gif',
+      '.bmp': 'image/bmp',
+    }
+    return map[ext] ?? 'application/octet-stream'
   }
 
   private async getUserUsedStorageBytes(userId: string) {
