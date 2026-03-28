@@ -30,22 +30,48 @@ interface PublicListenState {
   isPaused?: boolean
   trackStartedAt?: string | null
   pausedPosition?: number
+  serverTime?: string | null
 }
 
-function getServerPosition(state: PublicListenState): number {
-  if (state.isPaused) return state.pausedPosition ?? state.currentPosition ?? 0
+function clampPosition(position: number, duration?: number | null): number {
+  if (!Number.isFinite(position)) return 0
+  const clamped = Math.max(0, position)
+  if (typeof duration === 'number' && duration > 0) {
+    return Math.min(clamped, duration)
+  }
+  return clamped
+}
+
+function getServerOffsetMs(serverTime?: string | null, referenceTimeMs = Date.now()): number | null {
+  if (!serverTime) return null
+  const serverTimeMs = Date.parse(serverTime)
+  if (Number.isNaN(serverTimeMs)) return null
+  return serverTimeMs - referenceTimeMs
+}
+
+function getServerPosition(state: PublicListenState, serverOffsetMs: number | null): number {
+  const duration = state.currentTrack?.duration
+  if (state.isPaused) {
+    return clampPosition(state.pausedPosition ?? state.currentPosition ?? 0, duration)
+  }
+
   if (state.trackStartedAt) {
     const startedAtMs = Date.parse(state.trackStartedAt)
     if (!Number.isNaN(startedAtMs)) {
-      return Math.max(0, (Date.now() - startedAtMs) / 1000)
+      const serverNowMs = Date.now() + (serverOffsetMs ?? 0)
+      return clampPosition((serverNowMs - startedAtMs) / 1000, duration)
     }
   }
-  return state.currentPosition ?? 0
+
+  return clampPosition(state.currentPosition ?? 0, duration)
 }
 
 export function PublicListenPlayer({ code, initialState }: { code: string; initialState: PublicListenState }) {
   const [state, setState] = useState<PublicListenState>(initialState)
-  const [displayPosition, setDisplayPosition] = useState(() => getServerPosition(initialState))
+  const serverOffsetMsRef = useRef<number | null>(getServerOffsetMs(initialState.serverTime))
+  const [displayPosition, setDisplayPosition] = useState(() =>
+    getServerPosition(initialState, serverOffsetMsRef.current),
+  )
   const [needsGesture, setNeedsGesture] = useState(false)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const trackIdRef = useRef<string | null>(null)
@@ -100,7 +126,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       }
     }
 
-    audio.currentTime = getServerPosition(state)
+    audio.currentTime = getServerPosition(state, serverOffsetMsRef.current)
     try {
       await audio.play()
       setNeedsGesture(false)
@@ -120,9 +146,10 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       return
     }
 
-    const serverPosition = getServerPosition(next)
+    const serverPosition = getServerPosition(next, serverOffsetMsRef.current)
     const isTrackChanged = trackIdRef.current !== next.currentTrackId
     const isSourceMissing = !hasTrackSource(audio, next.currentTrackId)
+    const targetPosition = clampPosition(serverPosition, next.currentTrack?.duration)
 
     if (isTrackChanged || isSourceMissing) {
       trackIdRef.current = next.currentTrackId
@@ -132,14 +159,15 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       audio.addEventListener(
         'loadedmetadata',
         () => {
-          if (Math.abs(audio.currentTime - serverPosition) > SYNC_DRIFT_SECONDS) {
-            audio.currentTime = serverPosition
-          }
+          audio.currentTime = targetPosition
         },
         { once: true },
       )
-    } else if (Math.abs(audio.currentTime - serverPosition) > SYNC_DRIFT_SECONDS) {
-      audio.currentTime = serverPosition
+    } else {
+      const safeCurrentTime = clampPosition(audio.currentTime, next.currentTrack?.duration)
+      if (Math.abs(safeCurrentTime - targetPosition) > SYNC_DRIFT_SECONDS) {
+        audio.currentTime = targetPosition
+      }
     }
 
     if (next.isPaused) {
@@ -169,7 +197,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setDisplayPosition(getServerPosition(state))
+      setDisplayPosition(getServerPosition(state, serverOffsetMsRef.current))
     }, 250)
     return () => window.clearInterval(timer)
   }, [state])
@@ -185,6 +213,14 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         if (cancelled) return
         if (next.accessMode !== 'PUBLIC' || next.isPasswordProtected) return
 
+        const receivedAtMs = Date.now()
+        const offsetMs = getServerOffsetMs(next.serverTime, receivedAtMs)
+        if (offsetMs !== null) {
+          serverOffsetMsRef.current = offsetMs
+        }
+
+        const nextPosition = getServerPosition(next, serverOffsetMsRef.current)
+
         setState((prev) => ({
           ...prev,
           name: next.name ?? prev.name,
@@ -195,7 +231,9 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
           isPaused: next.isPaused ?? false,
           trackStartedAt: next.trackStartedAt ?? null,
           pausedPosition: next.pausedPosition ?? 0,
+          serverTime: next.serverTime ?? prev.serverTime ?? null,
         }))
+        setDisplayPosition(nextPosition)
       } catch {
         // keep previous state on transient network errors
       }

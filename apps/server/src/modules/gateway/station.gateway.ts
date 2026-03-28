@@ -36,6 +36,8 @@ interface AuthSocket extends Socket {
   stationId?: string
 }
 
+type PlaybackSyncType = 'heartbeat' | 'control'
+
 interface PlaybackState {
   currentTrackId: string | null
   currentQueueItemId: string | null
@@ -262,7 +264,7 @@ export class StationGateway
       switch (data.action) {
         case 'play':
           if (!state.currentTrackId) {
-            await this.handleSkipUnsafe(stationId)
+            await this.handleSkipUnsafe(stationId, 'control')
             return
           }
           state.isPaused = false
@@ -336,7 +338,7 @@ export class StationGateway
               false,
             )
             if (!started) {
-              await this.handleSkipUnsafe(stationId)
+              await this.handleSkipUnsafe(stationId, 'control')
             }
             return
           }
@@ -359,7 +361,7 @@ export class StationGateway
                   false,
                 )
                 if (!started) {
-                  await this.handleSkipUnsafe(stationId)
+                  await this.handleSkipUnsafe(stationId, 'control')
                 }
                 return
               }
@@ -393,6 +395,8 @@ export class StationGateway
                 trackStartedAt: state.trackStartedAt,
                 currentQueueType: state.currentQueueType,
                 queue,
+                serverTime: Date.now(),
+                syncType: 'track_changed',
               })
               return
             }
@@ -423,11 +427,11 @@ export class StationGateway
           break
 
         case 'skip':
-          await this.handleSkipUnsafe(stationId)
+          await this.handleSkipUnsafe(stationId, 'control')
           return
       }
 
-      this.emitPlaybackSync(stationId, state)
+      this.emitPlaybackSync(stationId, state, 'control')
     })
   }
 
@@ -503,7 +507,15 @@ export class StationGateway
     )
     if (!hasPermission) throw new WsException('No permission')
 
-    await this.handleSkip(client.stationId)
+    await this.handleSkip(client.stationId, 'control')
+  }
+
+  @SubscribeMessage(WS_EVENTS.TIME_SYNC)
+  handleTimeSync(@MessageBody() data: { clientTs?: number }) {
+    return {
+      clientTs: data?.clientTs,
+      serverTs: Date.now(),
+    }
   }
 
   @SubscribeMessage(WS_EVENTS.TRACK_ENDED)
@@ -607,7 +619,11 @@ export class StationGateway
     return Math.max(0, (Date.now() - state.trackStartedAt) / 1000)
   }
 
-  private emitPlaybackSync(stationId: string, state: PlaybackState) {
+  private emitPlaybackSync(
+    stationId: string,
+    state: PlaybackState,
+    syncType: PlaybackSyncType = 'heartbeat',
+  ) {
     this.server.to(stationId).emit(WS_EVENTS.PLAYBACK_SYNC, {
       currentTrackId: state.currentTrackId,
       currentQueueType: state.currentQueueType,
@@ -616,14 +632,19 @@ export class StationGateway
       trackStartedAt: state.trackStartedAt,
       loopMode: state.loopMode,
       shuffleEnabled: state.shuffleEnabled,
+      serverTime: Date.now(),
+      syncType,
     })
   }
 
-  private async handleSkip(stationId: string) {
-    await this.withPlaybackLock(stationId, () => this.handleSkipUnsafe(stationId))
+  private async handleSkip(stationId: string, syncType: PlaybackSyncType = 'heartbeat') {
+    await this.withPlaybackLock(stationId, () => this.handleSkipUnsafe(stationId, syncType))
   }
 
-  private async handleSkipUnsafe(stationId: string) {
+  private async handleSkipUnsafe(
+    stationId: string,
+    syncType: PlaybackSyncType = 'heartbeat',
+  ) {
     const state = this.getOrCreatePlaybackState(stationId)
     this.clearTrackEndTimer(stationId)
 
@@ -632,7 +653,7 @@ export class StationGateway
       state.trackStartedAt = Date.now()
       state.pausedPosition = 0
       this.scheduleTrackEnd(stationId)
-      this.emitPlaybackSync(stationId, state)
+      this.emitPlaybackSync(stationId, state, syncType)
       return
     }
 
@@ -669,7 +690,11 @@ export class StationGateway
       data: { currentTrackId: null, currentPosition: 0, trackStartedAt: null, isPaused: false },
     })
 
-    this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, { track: null })
+    this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, {
+      track: null,
+      serverTime: Date.now(),
+      syncType: 'track_changed',
+    })
   }
 
   private async playTrack(
@@ -748,6 +773,8 @@ export class StationGateway
       trackStartedAt: state.trackStartedAt,
       currentQueueType: state.currentQueueType,
       queue,
+      serverTime: Date.now(),
+      syncType: 'track_changed',
     })
     return true
   }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useCallback } from 'react'
-import { Howl } from 'howler'
+import { Howl, Howler } from 'howler'
 import { getSocket } from '@/lib/socket'
 import api from '@/lib/api'
 import { useStationStore } from '@/stores/station.store'
@@ -11,6 +11,15 @@ const stationStore = useStationStore
 import { WS_EVENTS, SYNC_THRESHOLD_SECONDS } from '@web-radio/shared'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api'
+const TIME_SYNC_INTERVAL_MS = 15_000
+const TIME_SYNC_EMA_ALPHA = 0.2
+const SOFT_SYNC_DEADBAND_SECONDS = 0.15
+const SOFT_SYNC_RATE_LIMIT = 0.03
+const HARD_SYNC_DRIFT_SECONDS = Math.max(SYNC_THRESHOLD_SECONDS * 2, 4)
+const HTML5_POOL_SIZE = 16
+
+const howlerGlobal = Howler as any
+howlerGlobal.html5PoolSize = Math.max(howlerGlobal.html5PoolSize ?? 0, HTML5_POOL_SIZE)
 
 export function useStation(code: string, joinPassword?: string | null) {
   const store = useStationStore()
@@ -18,6 +27,8 @@ export function useStation(code: string, joinPassword?: string | null) {
   const howlRef = useRef<Howl | null>(null)
   const soundIdRef = useRef<number | null>(null)
   const playbackTokenRef = useRef(0)
+  const serverOffsetRef = useRef<number | null>(null)
+  const bestServerOffsetRef = useRef<{ offsetMs: number; rttMs: number } | null>(null)
   const socket = getSocket()
 
   useEffect(() => {
@@ -68,6 +79,47 @@ export function useStation(code: string, joinPassword?: string | null) {
     soundIdRef.current = null
   }, [])
 
+  const getEstimatedServerNow = useCallback(() => {
+    return Date.now() + (serverOffsetRef.current ?? 0)
+  }, [])
+
+  const registerTimeSyncSample = useCallback((clientTs: number, serverTs: number) => {
+    const receivedTs = Date.now()
+    const rttMs = Math.max(0, receivedTs - clientTs)
+    const offsetMs = serverTs - (clientTs + rttMs / 2)
+
+    const best = bestServerOffsetRef.current
+    if (!best || rttMs < best.rttMs) {
+      bestServerOffsetRef.current = { offsetMs, rttMs }
+    }
+
+    if (serverOffsetRef.current == null) {
+      serverOffsetRef.current = offsetMs
+      return
+    }
+
+    const nextOffset = serverOffsetRef.current + (offsetMs - serverOffsetRef.current) * TIME_SYNC_EMA_ALPHA
+    const bestOffset = bestServerOffsetRef.current?.offsetMs
+
+    if (typeof bestOffset === 'number' && Math.abs(bestOffset - nextOffset) > 250) {
+      serverOffsetRef.current = bestOffset
+      return
+    }
+
+    serverOffsetRef.current = nextOffset
+  }, [])
+
+  const getStartPositionFromServer = useCallback((trackStartedAt?: number | null, duration?: number | null) => {
+    if (!trackStartedAt) return 0
+
+    const estimatedPosition = Math.max(0, (getEstimatedServerNow() - trackStartedAt) / 1000)
+    if (typeof duration === 'number' && Number.isFinite(duration)) {
+      return Math.min(estimatedPosition, Math.max(0, duration - 0.25))
+    }
+
+    return estimatedPosition
+  }, [getEstimatedServerNow])
+
   const playTrack = useCallback((trackId: string, startPosition = 0, shouldStartPlaying = true) => {
     const token = ++playbackTokenRef.current
     destroyHowl()
@@ -82,20 +134,23 @@ export function useStation(code: string, joinPassword?: string | null) {
     const howl = new Howl({
       src: [getStreamUrl(trackId)],
       html5: true,
+      pool: 10,
       volume: useAudioStore.getState().volume,
       preload: true,
       format: ['mp3', 'flac', 'wav', 'aac', 'ogg'],
       onload: () => {
         applyIfCurrent(() => {
-          howl.seek(startPosition)
+          const initialPosition = Math.max(0, startPosition)
+          howl.seek(initialPosition)
+          howl.rate(1)
           if (shouldStartPlaying) {
             const nextSoundId = howl.play()
             if (typeof nextSoundId === 'number') {
               soundIdRef.current = nextSoundId
             }
-            getState().setPlayback({ isPlaying: true, isPaused: false })
+            getState().setPlayback({ currentPosition: initialPosition, isPlaying: true, isPaused: false })
           } else {
-            getState().setPlayback({ isPlaying: false, isPaused: true })
+            getState().setPlayback({ currentPosition: initialPosition, isPlaying: false, isPaused: true })
           }
         })
       },
@@ -163,6 +218,14 @@ export function useStation(code: string, joinPassword?: string | null) {
       ...(joinPassword ? { password: joinPassword } : {}),
     })
 
+    const requestTimeSync = () => {
+      const clientTs = Date.now()
+      socket.emit(WS_EVENTS.TIME_SYNC, { clientTs }, (ack?: { clientTs?: number; serverTs?: number }) => {
+        if (!ack || ack.clientTs !== clientTs || typeof ack.serverTs !== 'number') return
+        registerTimeSyncSample(clientTs, ack.serverTs)
+      })
+    }
+
     const handleStationState = (state: any) => {
       const s = getState()
       s.setStation(state.station)
@@ -174,20 +237,17 @@ export function useStation(code: string, joinPassword?: string | null) {
       })
 
       if (state.currentTrack) {
+        const startPosition = getStartPositionFromServer(state.trackStartedAt, state.currentTrack.duration)
         s.setPlayback({
           currentTrack: state.currentTrack,
           currentQueueType: state.currentQueueType ?? null,
           isPaused: state.isPaused,
           trackStartedAt: state.trackStartedAt,
+          currentPosition: startPosition,
+          isPlaying: !state.isPaused,
         })
 
-        // Calculate current position with latency compensation
-        const now = Date.now()
-        const position = state.trackStartedAt
-          ? (now - state.trackStartedAt) / 1000
-          : 0
-
-        playTrack(state.currentTrack.id, position, !state.isPaused)
+        playTrack(state.currentTrack.id, startPosition, !state.isPaused)
       }
 
       setConnected(true)
@@ -196,17 +256,23 @@ export function useStation(code: string, joinPassword?: string | null) {
     socket.on(WS_EVENTS.STATION_STATE, handleStationState)
 
     const handleTrackChanged = (data: any) => {
+      const nextTrack = data.track ?? null
+      const startPosition = nextTrack
+        ? getStartPositionFromServer(data.trackStartedAt, nextTrack.duration)
+        : 0
+
       getState().setPlayback({
-        currentTrack: data.track,
+        currentTrack: nextTrack,
         currentQueueType: data.currentQueueType ?? null,
         trackStartedAt: data.trackStartedAt,
         isPaused: false,
-        isPlaying: !!data.track,
+        currentPosition: 0,
+        isPlaying: !!nextTrack,
       })
       if (data.queue) getState().setQueue(data.queue)
 
-      if (data.track) {
-        playTrack(data.track.id, 0)
+      if (nextTrack) {
+        playTrack(nextTrack.id, startPosition)
       } else {
         destroyHowl()
         getState().setPlayback({ isPlaying: false, isPaused: true })
@@ -215,10 +281,21 @@ export function useStation(code: string, joinPassword?: string | null) {
     socket.on(WS_EVENTS.TRACK_CHANGED, handleTrackChanged)
 
     const handlePlaybackSync = (data: any) => {
+      const currentTrackId = getState().playback.currentTrack?.id
+      if (data.currentTrackId && data.currentTrackId !== currentTrackId) {
+        return
+      }
+
+      const targetPosition = typeof data.position === 'number' && Number.isFinite(data.position)
+        ? Math.max(0, data.position)
+        : getState().playback.currentPosition
+      const nextIsPaused = typeof data.isPaused === 'boolean' ? data.isPaused : getState().playback.isPaused
+      const nextTrackStartedAt = typeof data.trackStartedAt === 'number' ? data.trackStartedAt : getState().playback.trackStartedAt
+
       getState().setPlayback({
-        currentPosition: data.position,
-        isPaused: data.isPaused,
-        trackStartedAt: data.trackStartedAt,
+        currentPosition: targetPosition,
+        isPaused: nextIsPaused,
+        trackStartedAt: nextTrackStartedAt,
         ...(data.currentQueueType !== undefined && { currentQueueType: data.currentQueueType }),
         ...(data.loopMode !== undefined && { loopMode: data.loopMode }),
         ...(data.shuffleEnabled !== undefined && { shuffleEnabled: data.shuffleEnabled }),
@@ -227,16 +304,24 @@ export function useStation(code: string, joinPassword?: string | null) {
       const howl = howlRef.current
       if (!howl) return
       const soundId = soundIdRef.current ?? undefined
+      const syncType = data.syncType ?? data.type ?? 'heartbeat'
 
-      if (!data.isPaused && howl.state() === 'loaded') {
+      if (!nextIsPaused && howl.state() === 'loaded') {
         const currentSeekRaw = howl.seek(soundId)
         const currentSeek = typeof currentSeekRaw === 'number' ? currentSeekRaw : 0
-        const diff = currentSeek - data.position // positive = client ahead, negative = behind
+        const diff = currentSeek - targetPosition // positive = client ahead, negative = behind
         const absDiff = Math.abs(diff)
+        const isHardSync = syncType === 'control' || syncType === 'track_changed'
+        const shouldHardSeek = isHardSync || absDiff >= HARD_SYNC_DRIFT_SECONDS || (syncType !== 'heartbeat' && absDiff > SYNC_THRESHOLD_SECONDS)
 
-        // Seek if drift exceeds threshold OR if the server jumped backwards (prev/seek)
-        if (absDiff > SYNC_THRESHOLD_SECONDS || diff > 1) {
-          howl.seek(data.position, soundId)
+        if (shouldHardSeek) {
+          howl.seek(targetPosition, soundId)
+          howl.rate(1, soundId)
+          getState().setPlayback({ currentPosition: targetPosition })
+        } else if (syncType === 'heartbeat') {
+          const correction = Math.max(-SOFT_SYNC_RATE_LIMIT, Math.min(SOFT_SYNC_RATE_LIMIT, -diff * 0.05))
+          const nextRate = absDiff <= SOFT_SYNC_DEADBAND_SECONDS ? 1 : 1 + correction
+          howl.rate(nextRate, soundId)
         }
 
         // Do not auto-create additional sound instances here.
@@ -246,8 +331,9 @@ export function useStation(code: string, joinPassword?: string | null) {
         }
       }
 
-      if (data.isPaused && soundId !== undefined && howl.playing(soundId)) {
+      if (nextIsPaused && soundId !== undefined && howl.playing(soundId)) {
         howl.pause(soundId)
+        howl.rate(1, soundId)
       }
     }
     socket.on(WS_EVENTS.PLAYBACK_SYNC, handlePlaybackSync)
@@ -305,12 +391,15 @@ export function useStation(code: string, joinPassword?: string | null) {
       socket.emit(WS_EVENTS.HEARTBEAT)
     }, 30_000)
 
+    requestTimeSync()
+    const timeSync = setInterval(requestTimeSync, TIME_SYNC_INTERVAL_MS)
+
     // Smooth progress bar — update position locally every 250ms
     const ticker = setInterval(() => {
       const s = stationStore.getState()
       const { isPaused, trackStartedAt } = s.playback
       if (!isPaused && trackStartedAt) {
-        s.setPlayback({ currentPosition: (Date.now() - trackStartedAt) / 1000 })
+        s.setPlayback({ currentPosition: Math.max(0, (getEstimatedServerNow() - trackStartedAt) / 1000) })
       }
     }, 250)
 
@@ -329,10 +418,11 @@ export function useStation(code: string, joinPassword?: string | null) {
       playbackTokenRef.current += 1
       destroyHowl()
       clearInterval(heartbeat)
+      clearInterval(timeSync)
       clearInterval(ticker)
       getState().reset()
     }
-  }, [code, joinPassword, destroyHowl, playTrack, socket])
+  }, [code, joinPassword, destroyHowl, getEstimatedServerNow, getStartPositionFromServer, playTrack, registerTimeSyncSample, socket])
 
   const sendPlaybackControl = useCallback(
     (action: string, position?: number, value?: string) => {
@@ -348,9 +438,7 @@ export function useStation(code: string, joinPassword?: string | null) {
   const restartAudio = useCallback(() => {
     const s = stationStore.getState()
     if (s.playback.currentTrack) {
-      const serverPosition = s.playback.trackStartedAt
-        ? Math.max(0, (Date.now() - s.playback.trackStartedAt) / 1000)
-        : s.playback.currentPosition
+      const serverPosition = getStartPositionFromServer(s.playback.trackStartedAt, s.playback.currentTrack.duration)
       const startPosition = s.playback.isPaused
         ? s.playback.currentPosition
         : serverPosition
@@ -366,7 +454,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     }
 
     s.setAudioNeedsRestart(false)
-  }, [playTrack])
+  }, [getStartPositionFromServer, playTrack])
 
   const addToQueue = useCallback(
     (

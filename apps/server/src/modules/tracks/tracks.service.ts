@@ -238,11 +238,13 @@ export class TracksService {
       fs.createReadStream(safePath).pipe(res)
     }
 
-    // Increment play count
-    this.prisma.track.update({
-      where: { id: trackId },
-      data: { playCount: { increment: 1 } },
-    }).catch(() => {})
+    // Count only full requests so seek/range probes do not inflate plays.
+    if (!range) {
+      this.prisma.track.update({
+        where: { id: trackId },
+        data: { playCount: { increment: 1 } },
+      }).catch(() => {})
+    }
   }
 
   async getCover(trackId: string, res: any, _userId?: string) {

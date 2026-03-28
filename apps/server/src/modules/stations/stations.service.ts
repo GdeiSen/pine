@@ -120,8 +120,9 @@ export class StationsService {
 
     // Public stations are visible without authentication.
     const accessMode = this.normalizeAccessMode(station.accessMode)
+    const serverTime = new Date()
     if (accessMode === StationAccessMode.PUBLIC) {
-      return this.formatStation(station, station._count.members, currentTrack)
+      return this.formatStation(station, station._count.members, currentTrack, serverTime)
     }
 
     // Private station metadata requires authentication.
@@ -129,7 +130,7 @@ export class StationsService {
       throw new ForbiddenException('Authentication required for non-public station')
     }
 
-    return this.formatStation(station, station._count.members, currentTrack)
+    return this.formatStation(station, station._count.members, currentTrack, serverTime)
   }
 
   async join(code: string, userId: string, password?: string) {
@@ -326,7 +327,12 @@ export class StationsService {
     return station
   }
 
-  private formatStation(station: any, listenerCount: number, currentTrack?: any | null) {
+  private formatStation(
+    station: any,
+    listenerCount: number,
+    currentTrack?: any | null,
+    serverTime?: Date,
+  ) {
     const accessMode = this.normalizeAccessMode(station.accessMode)
     return {
       id: station.id,
@@ -363,6 +369,7 @@ export class StationsService {
       activePlaylistId: station.activePlaylistId,
       listenerCount,
       createdAt: station.createdAt,
+      ...(serverTime ? { serverTime: serverTime.toISOString() } : {}),
     }
   }
 

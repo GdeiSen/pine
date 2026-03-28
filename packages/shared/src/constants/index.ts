@@ -18,7 +18,7 @@ export const SUPPORTED_AUDIO_FORMATS = [
 
 export const SUPPORTED_EXTENSIONS = ['.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a']
 
-export const PLAYBACK_SYNC_INTERVAL_MS = 30_000
+export const PLAYBACK_SYNC_INTERVAL_MS = 5_000
 export const HEARTBEAT_INTERVAL_MS = 30_000
 export const SYNC_THRESHOLD_SECONDS = 2
 
@@ -49,6 +49,7 @@ export const WS_EVENTS = {
   STATION_JOIN: 'station:join',
   STATION_LEAVE: 'station:leave',
   PLAYBACK_CONTROL: 'playback:control',
+  TIME_SYNC: 'time:sync',
   QUEUE_ADD: 'queue:add',
   QUEUE_REORDER: 'queue:reorder',
   QUEUE_REMOVE: 'queue:remove',
