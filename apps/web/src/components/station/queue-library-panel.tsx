@@ -301,7 +301,9 @@ function DraggableFolderChip({
           className={`text-[18px] font-semibold mt-1.5 leading-tight truncate ${isViewed ? "text-[--text-primary]" : "text-[--text-secondary]"}`}
         >
           {isActive && (
-            <span className="inline-block mr-1.5 text-[10px] leading-none text-[#E8440F] align-middle">●</span>
+            <span className="inline-block mr-1.5 text-[10px] leading-none text-[#E8440F] align-middle">
+              ●
+            </span>
           )}
           {playlist.name}
         </p>
@@ -656,7 +658,9 @@ export function QueueLibraryPanel({
       return;
     }
 
-    const exists = playlists.some((playlist) => playlist.id === currentPlaylistId);
+    const exists = playlists.some(
+      (playlist) => playlist.id === currentPlaylistId,
+    );
     if (!exists) {
       setCurrentPlaylistId(activePlaylistId ?? playlists[0].id);
     }
@@ -769,7 +773,9 @@ export function QueueLibraryPanel({
     return displayTracks.filter((track) => {
       const fields = [track.title, track.artist, track.filename, track.id];
       return fields.some((value) =>
-        String(value ?? "").toLowerCase().includes(normalizedTrackSearch),
+        String(value ?? "")
+          .toLowerCase()
+          .includes(normalizedTrackSearch),
       );
     });
   }, [displayTracks, normalizedTrackSearch]);
@@ -801,7 +807,6 @@ export function QueueLibraryPanel({
       );
       return;
     }
-
   };
 
   if (!stationId) return null;
@@ -865,16 +870,26 @@ export function QueueLibraryPanel({
         </AnimatePresence>
 
         <section className="space-y-3">
-          <div>
+          <div className="flex h-10 items-center justify-between">
             <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
               Library
             </p>
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              className="h-10 w-10 !p-0 flex items-center justify-center self-center"
+              onClick={() => createFolderMutation.mutate("New folder")}
+              title="Create folder"
+              isLoading={createFolderMutation.isPending}
+            >
+              <Plus size={18} />
+            </Button>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="ml-1 flex items-center">
             <div className="relative w-full sm:w-[220px] max-w-full">
               <Search
-                size={14}
-                className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[--text-muted]"
+                size={16}
+                className="absolute left-0 top-1/2 -translate-y-1/2 text-[--text-muted]"
               />
               <input
                 data-no-focus-ring="true"
@@ -882,7 +897,7 @@ export function QueueLibraryPanel({
                 value={trackSearch}
                 onChange={(e) => setTrackSearch(e.target.value)}
                 placeholder="search"
-                className="h-8 w-full rounded-lg !border-0 border-none pl-8 pr-8 text-sm text-[--text-primary] placeholder:text-[--text-muted] !outline-none transition-all focus:!border-0 focus:!outline-none focus-visible:!border-0 focus-visible:!outline-none focus:ring-0 focus-visible:ring-0"
+                className="h-8 w-full rounded-lg !border-0 border-none pl-6 pr-8 text-sm text-[--text-primary] placeholder:text-[--text-muted] !outline-none transition-all focus:!border-0 focus:!outline-none focus-visible:!border-0 focus-visible:!outline-none focus:ring-0 focus-visible:ring-0"
                 style={{
                   background: "transparent",
                   border: "none",
@@ -901,18 +916,9 @@ export function QueueLibraryPanel({
                 </button>
               )}
             </div>
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              onClick={() => createFolderMutation.mutate("New folder")}
-              title="Create folder"
-              isLoading={createFolderMutation.isPending}
-            >
-              <Plus size={13} />
-            </Button>
           </div>
 
-          <div className="mt-10 mb-10 -ml-6">
+          <div className="mt-4 mb-10 -ml-6">
             <div className="flex flex-wrap gap-2 pr-1">
               {playlists.map((playlist) => (
                 <DraggableFolderChip
@@ -935,7 +941,6 @@ export function QueueLibraryPanel({
               border: "1px solid var(--border)",
             }}
           >
-
             {tracksLoading ? (
               <div className="flex justify-center py-8">
                 <div className="w-5 h-5 border-2 border-[--color-accent] border-t-transparent rounded-full animate-spin" />
@@ -986,7 +991,6 @@ export function QueueLibraryPanel({
           )}
         </section>
       </div>
-
     </DndContext>
   );
 }

@@ -654,7 +654,7 @@ export function AddTracksPanel({
         <motion.section
           initial={{ opacity: 0, y: 8 }}
           animate={{ opacity: 1, y: 0 }}
-          className="px-4 py-4 md:px-8 md:py-6"
+          className="px-3 py-3 md:px-4 md:py-4"
         >
           <Button
             variant="ghost"
@@ -736,7 +736,7 @@ export function AddTracksPanel({
         </motion.section>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-3 md:p-8">
+      <div className="flex-1 overflow-y-auto p-2 md:p-4">
         {isUploadMode ? (
           <motion.section
             initial={{ opacity: 0, y: 8 }}
@@ -844,13 +844,7 @@ export function AddTracksPanel({
             )}
           </motion.section>
         ) : (
-          <div
-            className="rounded-2xl p-2"
-            style={{
-              background: "var(--bg-elevated)",
-              border: "1px solid var(--border)",
-            }}
-          >
+          <div className="p-0">
             {tracksLoading ? (
               <div className="flex justify-center py-8">
                 <div className="w-5 h-5 border-2 border-[--color-accent] border-t-transparent rounded-full animate-spin" />
