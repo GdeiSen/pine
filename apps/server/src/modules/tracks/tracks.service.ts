@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common'
 import * as fs from 'fs'
 import * as path from 'path'
@@ -19,6 +20,7 @@ import {
 @Injectable()
 export class TracksService {
   private storagePath: string
+  private readonly logger = new Logger(TracksService.name)
 
   constructor(
     private prisma: PrismaService,
@@ -56,8 +58,10 @@ export class TracksService {
     try {
       const { parseFile } = await import('music-metadata')
       metadata = await parseFile(file.path)
-    } catch (_e) {
-      // metadata parsing failed, continue without it
+    } catch (error: any) {
+      this.logger.warn(
+        `Metadata parsing failed for ${file.originalname}: ${error?.message ?? String(error)}`,
+      )
     }
 
     const common = metadata?.common ?? {}
@@ -100,6 +104,9 @@ export class TracksService {
     // Extract and save cover if present
     if (common.picture?.[0]) {
       await this.saveCover(track.id, stationId, common.picture[0])
+    } else {
+      // Fallback for files where picture was not exposed by initial parse.
+      await this.ensureCoverForTrack(track)
     }
 
     // Add to playlist
@@ -129,6 +136,14 @@ export class TracksService {
       },
       orderBy: { createdAt: 'desc' },
     })
+
+    await Promise.all(
+      tracks.map(async (track) => {
+        const coverPath = await this.ensureCoverForTrack(track)
+        if (coverPath) track.coverPath = coverPath
+      }),
+    )
+
     return tracks.map(this.formatTrack)
   }
 
@@ -151,6 +166,14 @@ export class TracksService {
       },
       orderBy: { sortOrder: 'asc' },
     })
+
+    await Promise.all(
+      items.map(async (item) => {
+        const coverPath = await this.ensureCoverForTrack(item.track)
+        if (coverPath) item.track.coverPath = coverPath
+      }),
+    )
+
     return items.map((item) => ({
       ...this.formatTrack(item.track),
       sortOrder: item.sortOrder,
@@ -223,8 +246,13 @@ export class TracksService {
 
   async getCover(trackId: string, res: any, _userId?: string) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
-    if (!track || !track.coverPath) throw new NotFoundException('Cover not found')
-    const safeCoverPath = this.resolveSafeStorageFilePath(track.coverPath)
+    if (!track) throw new NotFoundException('Track not found')
+
+    const coverPath = await this.ensureCoverForTrack(track)
+    if (!coverPath) {
+      throw new NotFoundException('Cover file not found')
+    }
+    const safeCoverPath = this.resolveSafeStorageFilePath(coverPath)
     if (!safeCoverPath || !fs.existsSync(safeCoverPath)) {
       throw new NotFoundException('Cover file not found')
     }
@@ -303,21 +331,56 @@ export class TracksService {
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-  private async saveCover(trackId: string, stationId: string, picture: any) {
+  private async ensureCoverForTrack(track: {
+    id: string
+    stationId: string
+    originalPath: string
+    coverPath?: string | null
+  }): Promise<string | null> {
+    const existingCoverPath = this.resolveSafeStorageFilePath(track.coverPath)
+    if (existingCoverPath && fs.existsSync(existingCoverPath)) {
+      return existingCoverPath
+    }
+
+    const safeAudioPath = this.resolveSafeStorageFilePath(track.originalPath)
+    if (!safeAudioPath || !fs.existsSync(safeAudioPath)) return null
+
+    try {
+      const { parseFile } = await import('music-metadata')
+      const metadata = await parseFile(safeAudioPath)
+      const picture = metadata?.common?.picture?.[0]
+      if (!picture?.data) return null
+
+      return await this.saveCover(track.id, track.stationId, picture)
+    } catch (error: any) {
+      this.logger.warn(
+        `Cover extraction failed for track ${track.id}: ${error?.message ?? String(error)}`,
+      )
+      return null
+    }
+  }
+
+  private async saveCover(trackId: string, stationId: string, picture: any): Promise<string | null> {
     try {
       const sharp = (await import('sharp')).default
       const coverDir = path.join(this.storagePath, 'stations', stationId, 'covers')
       fs.mkdirSync(coverDir, { recursive: true })
 
       const coverPath = path.join(coverDir, `${trackId}.webp`)
-      await sharp(picture.data).resize(500, 500, { fit: 'cover' }).webp({ quality: 85 }).toFile(coverPath)
+      await sharp(picture.data)
+        .rotate()
+        .resize(500, 500, { fit: 'cover' })
+        .webp({ quality: 85 })
+        .toFile(coverPath)
 
       await this.prisma.track.update({
         where: { id: trackId },
         data: { coverPath },
       })
+      return coverPath
     } catch (_e) {
-      // Cover extraction failed silently
+      this.logger.warn(`Cover save failed for track ${trackId}`)
+      return null
     }
   }
 
