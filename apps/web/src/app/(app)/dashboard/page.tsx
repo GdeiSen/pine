@@ -384,25 +384,6 @@ export default function DashboardPage() {
         <div className="relative z-20 flex-1 min-h-0 flex flex-col">
           <div className="px-5 py-4">
             <div className="w-full max-w-[900px] flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-              <form
-                onSubmit={handleSearchSubmit}
-                className="w-full sm:flex-1 h-11 rounded-xl flex items-center gap-2 px-3 focus-within:outline-none focus-within:ring-0"
-                style={{
-                  background: "var(--bg-elevated)",
-                  border: "1px solid var(--border)",
-                  boxShadow: "none",
-                  outline: "none",
-                }}
-              >
-                <Search size={14} className="text-[--text-muted] shrink-0" />
-                <input
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by station name or paste 6-digit code"
-                  className="w-full text-sm bg-transparent text-[--text-primary] placeholder:text-[--text-muted] outline-none focus:outline-none focus-visible:outline-none ring-0 focus:ring-0 focus-visible:ring-0"
-                  style={{ outline: "none", boxShadow: "none" }}
-                />
-              </form>
               <Button
                 type="button"
                 className="h-11 px-4 w-full sm:w-auto sm:shrink-0"
@@ -418,6 +399,26 @@ export default function DashboardPage() {
           </div>
 
           <div ref={mapAreaRef} className="relative flex-1 min-h-0">
+            <form
+              onSubmit={handleSearchSubmit}
+              className="absolute z-30 left-4 bottom-4 w-[calc(100%-2rem)] sm:w-[420px] h-11 rounded-xl flex items-center gap-2 px-3 focus-within:outline-none focus-within:ring-0"
+              style={{
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border)",
+                boxShadow: "var(--shadow-sm)",
+                outline: "none",
+              }}
+            >
+              <Search size={14} className="text-[--text-muted] shrink-0" />
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search by station name or paste 6-digit code"
+                className="w-full text-sm bg-transparent text-[--text-primary] placeholder:text-[--text-muted] outline-none focus:outline-none focus-visible:outline-none ring-0 focus:ring-0 focus-visible:ring-0"
+                style={{ outline: "none", boxShadow: "none" }}
+              />
+            </form>
+
             {!isLoading && plottedStations.length > 0 && (
               <div className="absolute inset-0 z-10 pointer-events-none">
                 {plottedStations.map(({ station, x, y }, i) => (

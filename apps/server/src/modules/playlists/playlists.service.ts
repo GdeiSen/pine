@@ -2,6 +2,8 @@ import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/commo
 import { PrismaService } from '../../prisma/prisma.service'
 import { QueueService } from '../queue/queue.service'
 import { IsString, MinLength, MaxLength } from 'class-validator'
+import * as fs from 'fs'
+import * as path from 'path'
 
 export class CreatePlaylistDto {
   @IsString()
@@ -71,7 +73,50 @@ export class PlaylistsService {
     if (playlist.isDefault) throw new ForbiddenException('Cannot delete default playlist')
     await this.assertStationAccess(playlist.stationId, userId)
 
+    const trackLinks = await this.prisma.playlistTrack.findMany({
+      where: { playlistId },
+      select: { trackId: true },
+    })
+    const trackIds = Array.from(new Set(trackLinks.map((item) => item.trackId)))
+
     await this.prisma.playlist.delete({ where: { id: playlistId } })
+
+    if (!trackIds.length) return
+
+    const orphanTracks = await this.prisma.track.findMany({
+      where: {
+        id: { in: trackIds },
+        playlists: { none: {} },
+      },
+      select: {
+        id: true,
+        originalPath: true,
+        highPath: true,
+        mediumPath: true,
+        lowPath: true,
+        coverPath: true,
+      },
+    })
+
+    for (const track of orphanTracks) {
+      const files = [
+        track.originalPath,
+        track.highPath,
+        track.mediumPath,
+        track.lowPath,
+        track.coverPath,
+      ].filter((value): value is string => Boolean(value))
+
+      for (const filePath of files) {
+        this.safeDeleteStorageFile(filePath)
+      }
+    }
+
+    if (orphanTracks.length) {
+      await this.prisma.track.deleteMany({
+        where: { id: { in: orphanTracks.map((t) => t.id) } },
+      })
+    }
   }
 
   async activate(playlistId: string, stationId: string, userId: string) {
@@ -132,5 +177,16 @@ export class PlaylistsService {
       where: { stationId_userId: { stationId, userId } },
     })
     if (!member) throw new ForbiddenException('Access denied')
+  }
+
+  private safeDeleteStorageFile(rawPath: string) {
+    try {
+      const storageRoot = path.resolve(process.env.STORAGE_PATH ?? './storage')
+      const resolved = path.resolve(rawPath)
+      if (!resolved.startsWith(`${storageRoot}${path.sep}`)) return
+      if (fs.existsSync(resolved)) fs.unlinkSync(resolved)
+    } catch {
+      // no-op: deleting stale files should not fail playlist removal
+    }
   }
 }

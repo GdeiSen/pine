@@ -1215,38 +1215,44 @@ export default function StationPage({
                             )}
                           </div>
                         )}
-                      </div>
 
-                      <div className="flex justify-end">
-                        <div className="relative w-[220px] max-w-full">
-                          <Search
-                            size={14}
-                            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[--text-muted]"
-                          />
-                          <input
-                            data-no-focus-ring="true"
-                            type="text"
-                            value={memberSearch}
-                            onChange={(e) => setMemberSearch(e.target.value)}
-                            placeholder="search"
-                            className="h-8 w-full rounded-lg !border-0 border-none pl-8 pr-8 text-sm text-[--text-primary] placeholder:text-[--text-muted] !outline-none transition-all focus:!border-0 focus:!outline-none focus-visible:!border-0 focus-visible:!outline-none focus:ring-0 focus-visible:ring-0"
-                            style={{
-                              background: "transparent",
-                              border: "none",
-                              outline: "none",
-                              boxShadow: "none",
-                            }}
-                          />
-                          {memberSearch && (
-                            <button
-                              type="button"
-                              onClick={() => setMemberSearch("")}
-                              className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-[--text-muted] hover:bg-[--bg-elevated] hover:text-[--text-primary]"
-                              title="Clear search"
-                            >
-                              <X size={13} />
-                            </button>
-                          )}
+                        <div
+                          className="absolute left-5 bottom-5 z-30 w-[220px] max-w-[calc(100%-2rem)] rounded-xl h-9 flex items-center"
+                          style={{
+                            background: "var(--bg)",
+                            boxShadow: "var(--shadow-sm)",
+                          }}
+                        >
+                          <div className="relative w-full">
+                            <Search
+                              size={14}
+                              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[--text-muted]"
+                            />
+                            <input
+                              data-no-focus-ring="true"
+                              type="text"
+                              value={memberSearch}
+                              onChange={(e) => setMemberSearch(e.target.value)}
+                              placeholder="search"
+                              className="h-9 w-full rounded-xl !border-0 border-none pl-8 pr-8 text-sm text-[--text-primary] placeholder:text-[--text-muted] !outline-none transition-all focus:!border-0 focus:!outline-none focus-visible:!border-0 focus-visible:!outline-none focus:ring-0 focus-visible:ring-0"
+                              style={{
+                                background: "transparent",
+                                border: "none",
+                                outline: "none",
+                                boxShadow: "none",
+                              }}
+                            />
+                            {memberSearch && (
+                              <button
+                                type="button"
+                                onClick={() => setMemberSearch("")}
+                                className="absolute right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-[--text-muted] hover:bg-[--bg-subtle] hover:text-[--text-primary]"
+                                title="Clear search"
+                              >
+                                <X size={13} />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
 

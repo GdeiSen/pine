@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { ArrowLeft, Lock, Radio, ShieldCheck, Sparkles, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { ConfirmModal } from '@/components/ui/confirm-modal'
 import api from '@/lib/api'
 
 type AccessMode = 'PUBLIC' | 'PRIVATE'
@@ -31,6 +32,7 @@ export default function StationSettingsPage({ params }: { params: Promise<{ code
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
 
@@ -109,10 +111,6 @@ export default function StationSettingsPage({ params }: { params: Promise<{ code
 
   const handleDeleteStation = async () => {
     if (!station || deleting) return
-    const confirmed = window.confirm(
-      `Delete station "${station.name}" permanently? This cannot be undone.`,
-    )
-    if (!confirmed) return
 
     setDeleting(true)
     setError('')
@@ -120,8 +118,10 @@ export default function StationSettingsPage({ params }: { params: Promise<{ code
     try {
       await api.delete(`/stations/${station.id}`)
       router.push('/dashboard')
+      return true
     } catch (err: any) {
       setError(err?.response?.data?.message ?? 'Failed to delete station')
+      return false
     } finally {
       setDeleting(false)
     }
@@ -312,7 +312,7 @@ export default function StationSettingsPage({ params }: { params: Promise<{ code
               <p className="text-sm text-[--text-muted] mb-4">
                 Remove this station completely with its queue, tracks and settings.
               </p>
-              <Button variant="danger" className="!pl-0 pr-4 justify-start !bg-transparent hover:!bg-transparent" onClick={handleDeleteStation} isLoading={deleting}>
+              <Button variant="danger" className="!pl-0 pr-4 justify-start !bg-transparent hover:!bg-transparent" onClick={() => setDeleteModalOpen(true)} isLoading={deleting}>
                 <X size={14} />
                 Delete Station
               </Button>
@@ -320,6 +320,18 @@ export default function StationSettingsPage({ params }: { params: Promise<{ code
           </div>
         )}
       </div>
+      <ConfirmModal
+        open={deleteModalOpen}
+        title="Delete station?"
+        description={station ? `Station "${station.name}" will be removed permanently with its queue, tracks and settings.` : ''}
+        confirmLabel="Delete station"
+        loading={deleting}
+        onCancel={() => setDeleteModalOpen(false)}
+        onConfirm={async () => {
+          const success = await handleDeleteStation()
+          if (success) setDeleteModalOpen(false)
+        }}
+      />
     </div>
   )
 }
