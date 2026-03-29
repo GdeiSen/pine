@@ -302,6 +302,9 @@ export default function StationPage({
     members,
     chat,
     audioNeedsRestart,
+    audioConnectionState,
+    audioConnectionMessage,
+    audioDiagnostics,
     isConnected,
     isConnecting,
     sendPlaybackControl,
@@ -854,6 +857,9 @@ export default function StationPage({
             stationName={station?.name ?? ""}
             stationCode={station?.code ?? code}
             audioNeedsRestart={audioNeedsRestart}
+            audioConnectionState={audioConnectionState}
+            audioConnectionMessage={audioConnectionMessage}
+            audioDiagnostics={audioDiagnostics}
             onRestartAudio={restartAudio}
           />
         ) : (
@@ -1017,6 +1023,9 @@ export default function StationPage({
                   stationCode={station?.code ?? code}
                   canControl={canControl}
                   audioNeedsRestart={audioNeedsRestart}
+                  audioConnectionState={audioConnectionState}
+                  audioConnectionMessage={audioConnectionMessage}
+                  audioDiagnostics={audioDiagnostics}
                   loopMode={loopMode}
                   shuffleEnabled={shuffleEnabled}
                   onPlayPause={handleToggle}

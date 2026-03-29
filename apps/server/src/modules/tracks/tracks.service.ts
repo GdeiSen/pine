@@ -5,30 +5,28 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common'
+import { TrackAssetKind } from '@prisma/client'
 import * as fs from 'fs'
 import * as path from 'path'
-import { ConfigService } from '@nestjs/config'
+import { v4 as uuid } from 'uuid'
 import { PrismaService } from '../../prisma/prisma.service'
+import { StorageService } from '../storage/storage.service'
+import { StorageScope } from '../storage/storage.config'
 import {
   TrackStatus,
   TrackQuality,
   SUPPORTED_AUDIO_FORMATS,
-  StreamQuality,
   USER_STORAGE_LIMIT_BYTES,
 } from '@web-radio/shared'
 
 @Injectable()
 export class TracksService {
-  private storagePath: string
   private readonly logger = new Logger(TracksService.name)
-  private readonly coverExtractionFailed = new Set<string>()
 
   constructor(
     private prisma: PrismaService,
-    private configService: ConfigService,
-  ) {
-    this.storagePath = path.resolve(this.configService.get<string>('STORAGE_PATH', './storage'))
-  }
+    private storageService: StorageService,
+  ) {}
 
   async upload(
     stationId: string,
@@ -36,9 +34,8 @@ export class TracksService {
     userId: string,
     file: Express.Multer.File,
   ) {
-    // Validate file type
     if (!SUPPORTED_AUDIO_FORMATS.includes(file.mimetype)) {
-      this.safeDeleteFile(file.path)
+      this.safeDeleteTempFile(file.path)
       throw new BadRequestException('Unsupported audio format')
     }
 
@@ -47,84 +44,122 @@ export class TracksService {
 
     const usedStorage = await this.getUserUsedStorageBytes(userId)
     if (usedStorage + file.size > USER_STORAGE_LIMIT_BYTES) {
-      this.safeDeleteFile(file.path)
+      this.safeDeleteTempFile(file.path)
       const available = Math.max(USER_STORAGE_LIMIT_BYTES - usedStorage, 0)
       throw new BadRequestException(
         `Storage limit exceeded. Available ${this.formatBytes(available)} of ${this.formatBytes(USER_STORAGE_LIMIT_BYTES)}.`,
       )
     }
 
-    // Parse metadata
-    let metadata: any = {}
+    const fallbackExt = path.extname(file.originalname).toLowerCase() || '.mp3'
+    const objectFileName = file.filename || `${uuid()}${fallbackExt}`
+    const originalObjectKey = this.storageService.buildObjectKey({
+      stationId,
+      scope: 'tracks',
+      fileName: objectFileName,
+    })
+
     try {
-      const { parseFile } = await import('music-metadata')
-      metadata = await parseFile(file.path)
-    } catch (error: any) {
-      this.logger.warn(
-        `Metadata parsing failed for ${file.originalname}: ${error?.message ?? String(error)}`,
-      )
+      await this.storageService.uploadFile('tracks', originalObjectKey, file.path, file.mimetype)
+
+      let metadata: any = {}
+      try {
+        const { parseFile } = await import('music-metadata')
+        metadata = await parseFile(file.path)
+      } catch (error: any) {
+        this.logger.warn(
+          `Metadata parsing failed for ${file.originalname}: ${error?.message ?? String(error)}`,
+        )
+      }
+
+      const common = metadata?.common ?? {}
+      const format = metadata?.format ?? {}
+      const duration = format.duration ?? 0
+      const bitrate = format.bitrate ? Math.round(format.bitrate / 1000) : null
+
+      let quality = TrackQuality.MEDIUM
+      if (bitrate) {
+        if (bitrate >= 300) quality = TrackQuality.HIGH
+        else if (bitrate <= 80) quality = TrackQuality.LOW
+      }
+      if (file.mimetype === 'audio/flac') quality = TrackQuality.LOSSLESS
+
+      const track = await this.prisma.track.create({
+        data: {
+          stationId,
+          uploadedById: userId,
+          filename: file.originalname,
+          originalPath: originalObjectKey,
+          title: common.title ?? null,
+          artist: common.artist ?? null,
+          album: common.album ?? null,
+          year: common.year ?? null,
+          genre: common.genre?.[0] ?? null,
+          duration,
+          fileSize: file.size,
+          bitrate,
+          sampleRate: format.sampleRate ?? null,
+          quality,
+          status: TrackStatus.READY,
+        },
+        include: {
+          uploadedBy: { select: { id: true, username: true, avatar: true } },
+        },
+      })
+
+      await this.prisma.trackAsset.upsert({
+        where: {
+          trackId_kind: {
+            trackId: track.id,
+            kind: TrackAssetKind.ORIGINAL,
+          },
+        },
+        create: {
+          trackId: track.id,
+          kind: TrackAssetKind.ORIGINAL,
+          objectKey: originalObjectKey,
+          mimeType: file.mimetype || 'audio/mpeg',
+          byteSize: file.size,
+          bitrate,
+          sampleRate: format.sampleRate ?? null,
+          channels: format.numberOfChannels ?? null,
+          duration: format.duration ?? null,
+        },
+        update: {
+          objectKey: originalObjectKey,
+          mimeType: file.mimetype || 'audio/mpeg',
+          byteSize: file.size,
+          bitrate,
+          sampleRate: format.sampleRate ?? null,
+          channels: format.numberOfChannels ?? null,
+          duration: format.duration ?? null,
+        },
+      })
+
+      if (common.picture?.[0]) {
+        await this.saveCover(track.id, stationId, common.picture[0])
+      }
+
+      const playlistTrackCount = await this.prisma.playlistTrack.count({
+        where: { playlistId },
+      })
+
+      await this.prisma.playlistTrack.create({
+        data: {
+          playlistId,
+          trackId: track.id,
+          sortOrder: playlistTrackCount,
+          addedById: userId,
+        },
+      })
+
+      return this.formatTrack(track)
+    } catch (error) {
+      await this.storageService.deleteObject('tracks', originalObjectKey).catch(() => undefined)
+      throw error
+    } finally {
+      this.safeDeleteTempFile(file.path)
     }
-
-    const common = metadata?.common ?? {}
-    const format = metadata?.format ?? {}
-    const duration = format.duration ?? 0
-    const bitrate = format.bitrate ? Math.round(format.bitrate / 1000) : null
-
-    // Determine quality
-    let quality = TrackQuality.MEDIUM
-    if (bitrate) {
-      if (bitrate >= 300) quality = TrackQuality.HIGH
-      else if (bitrate <= 80) quality = TrackQuality.LOW
-    }
-    if (file.mimetype === 'audio/flac') quality = TrackQuality.LOSSLESS
-
-    // Create track record
-    const track = await this.prisma.track.create({
-      data: {
-        stationId,
-        uploadedById: userId,
-        filename: file.originalname,
-        originalPath: file.path,
-        title: common.title ?? null,
-        artist: common.artist ?? null,
-        album: common.album ?? null,
-        year: common.year ?? null,
-        genre: common.genre?.[0] ?? null,
-        duration,
-        fileSize: file.size,
-        bitrate,
-        sampleRate: format.sampleRate ?? null,
-        quality,
-        status: TrackStatus.READY,
-      },
-      include: {
-        uploadedBy: { select: { id: true, username: true, avatar: true } },
-      },
-    })
-
-    // Extract and save cover if present
-    if (common.picture?.[0]) {
-      await this.saveCover(track.id, stationId, common.picture[0])
-    } else {
-      // Fallback for files where picture was not exposed by initial parse.
-      await this.ensureCoverForTrack(track)
-    }
-
-    // Add to playlist
-    const playlistTrackCount = await this.prisma.playlistTrack.count({
-      where: { playlistId },
-    })
-
-    await this.prisma.playlistTrack.create({
-      data: {
-        playlistId,
-        trackId: track.id,
-        sortOrder: playlistTrackCount,
-        addedById: userId,
-      },
-    })
-
-    return this.formatTrack(track)
   }
 
   async getStationTracks(stationId: string, userId: string) {
@@ -137,13 +172,6 @@ export class TracksService {
       },
       orderBy: { createdAt: 'desc' },
     })
-
-    await Promise.all(
-      tracks.map(async (track) => {
-        const coverPath = await this.ensureCoverForTrack(track)
-        if (coverPath) track.coverPath = coverPath
-      }),
-    )
 
     return tracks.map(this.formatTrack)
   }
@@ -168,13 +196,6 @@ export class TracksService {
       orderBy: { sortOrder: 'asc' },
     })
 
-    await Promise.all(
-      items.map(async (item) => {
-        const coverPath = await this.ensureCoverForTrack(item.track)
-        if (coverPath) item.track.coverPath = coverPath
-      }),
-    )
-
     return items.map((item) => ({
       ...this.formatTrack(item.track),
       sortOrder: item.sortOrder,
@@ -183,110 +204,47 @@ export class TracksService {
     }))
   }
 
-  async streamTrack(
-    trackId: string,
-    range: string | undefined,
-    res: any,
-    qualityParam?: string,
-    userId?: string,
-  ) {
+  async getCover(trackId: string, res: any, userId?: string) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track) throw new NotFoundException('Track not found')
     await this.assertStationReadable(track.stationId, userId)
 
-    const quality = (qualityParam ?? '').toUpperCase()
-    const desired = Object.values(StreamQuality).includes(quality as StreamQuality)
-      ? (quality as StreamQuality)
-      : StreamQuality.HIGH
+    if (!track.coverPath) {
+      throw new NotFoundException('Cover file not found')
+    }
 
-    const filePath =
-      desired === StreamQuality.LOW
-        ? (track.lowPath ?? track.mediumPath ?? track.highPath ?? track.originalPath)
-        : desired === StreamQuality.MEDIUM
-          ? (track.mediumPath ?? track.highPath ?? track.lowPath ?? track.originalPath)
-          : (track.highPath ?? track.mediumPath ?? track.lowPath ?? track.originalPath)
-
-    const safePath = this.resolveSafeStorageFilePath(filePath)
-    if (!safePath || !fs.existsSync(safePath)) throw new NotFoundException('Audio file not found')
-
-    const stat = fs.statSync(safePath)
-    const fileSize = stat.size
-    const mimeType = this.getMimeType(safePath)
-
-    if (range) {
-      const parts = range.replace(/bytes=/, '').split('-')
-      const start = parseInt(parts[0], 10)
-      const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1
-      const chunkSize = end - start + 1
-
-      res.status(206)
+    try {
+      const stream = await this.storageService.getObjectStream('covers', track.coverPath)
       res.set({
-        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-        'Accept-Ranges': 'bytes',
-        'Content-Length': chunkSize,
-        'Content-Type': mimeType,
+        'Content-Type': this.getMimeTypeByExt(track.coverPath, 'image/webp'),
+        'Cache-Control': 'public, max-age=86400',
       })
-
-      const stream = fs.createReadStream(safePath, { start, end })
+      stream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(404).end()
+          return
+        }
+        res.end()
+      })
       stream.pipe(res)
-    } else {
-      res.set({
-        'Content-Length': fileSize,
-        'Content-Type': mimeType,
-        'Accept-Ranges': 'bytes',
-      })
-      fs.createReadStream(safePath).pipe(res)
-    }
-
-    // Count only full requests so seek/range probes do not inflate plays.
-    if (!range) {
-      this.prisma.track.update({
-        where: { id: trackId },
-        data: { playCount: { increment: 1 } },
-      }).catch(() => {})
-    }
-  }
-
-  async getCover(trackId: string, res: any, _userId?: string) {
-    const track = await this.prisma.track.findUnique({ where: { id: trackId } })
-    if (!track) throw new NotFoundException('Track not found')
-
-    const coverPath = await this.ensureCoverForTrack(track)
-    if (!coverPath) {
+    } catch {
       throw new NotFoundException('Cover file not found')
     }
-    const safeCoverPath = this.resolveSafeStorageFilePath(coverPath)
-    if (!safeCoverPath || !fs.existsSync(safeCoverPath)) {
-      throw new NotFoundException('Cover file not found')
-    }
-
-    res.set({
-      'Content-Type': this.getImageMimeType(safeCoverPath),
-      'Cache-Control': 'public, max-age=86400',
-    })
-    fs.createReadStream(safeCoverPath).pipe(res)
   }
 
   async deleteTrack(trackId: string, userId: string) {
     const track = await this.prisma.track.findUnique({
       where: { id: trackId },
-      include: { uploadedBy: true },
+      include: { assets: true },
     })
     if (!track) throw new NotFoundException('Track not found')
 
-    // Check if user is uploader or station owner
     const station = await this.prisma.station.findUnique({ where: { id: track.stationId } })
     if (track.uploadedById !== userId && station?.ownerId !== userId) {
       throw new ForbiddenException('Cannot delete this track')
     }
 
-    // Delete files
-    const files = [track.originalPath, track.coverPath].filter(Boolean) as string[]
-    for (const f of files) {
-      const safePath = this.resolveSafeStorageFilePath(f)
-      if (safePath && fs.existsSync(safePath)) fs.unlinkSync(safePath)
-    }
-
+    await this.deleteTrackAssets(track)
     await this.prisma.track.delete({ where: { id: trackId } })
   }
 
@@ -335,120 +293,151 @@ export class TracksService {
     return { data: JSON.parse(track.waveformData) }
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-  private async ensureCoverForTrack(track: {
-    id: string
-    stationId: string
-    originalPath: string
-    coverPath?: string | null
-  }): Promise<string | null> {
-    if (this.coverExtractionFailed.has(track.id)) return null
-
-    const existingCoverPath = this.resolveSafeStorageFilePath(track.coverPath)
-    if (existingCoverPath && fs.existsSync(existingCoverPath)) {
-      this.coverExtractionFailed.delete(track.id)
-      return existingCoverPath
-    }
-
-    const safeAudioPath = this.resolveSafeStorageFilePath(track.originalPath)
-    if (!safeAudioPath || !fs.existsSync(safeAudioPath)) return null
-
-    try {
-      const { parseFile } = await import('music-metadata')
-      const metadata = await parseFile(safeAudioPath)
-      const picture = metadata?.common?.picture?.[0]
-      if (!picture?.data) return null
-
-      const saved = await this.saveCover(track.id, track.stationId, picture)
-      if (saved) this.coverExtractionFailed.delete(track.id)
-      else this.coverExtractionFailed.add(track.id)
-      return saved
-    } catch (error: any) {
-      this.logger.warn(
-        `Cover extraction failed for track ${track.id}: ${error?.message ?? String(error)}`,
-      )
-      this.coverExtractionFailed.add(track.id)
-      return null
-    }
-  }
-
   private async saveCover(
     trackId: string,
     stationId: string,
     picture: { data: Uint8Array | Buffer; format?: string },
   ): Promise<string | null> {
-    try {
-      const sharp = (await import('sharp')).default
-      const coverDir = path.join(this.storagePath, 'stations', stationId, 'covers')
-      fs.mkdirSync(coverDir, { recursive: true })
-      const coverData = Buffer.from(picture.data)
+    const pictureBuffer = Buffer.from(picture.data)
+    const coverBaseObjectKey = this.storageService.buildObjectKey({
+      stationId,
+      scope: 'covers',
+      fileName: trackId,
+    })
 
-      const coverPath = path.join(coverDir, `${trackId}.webp`)
-      await sharp(coverData)
+    try {
+      const sharpFactory = await this.resolveSharpFactory()
+      const webpBuffer = await sharpFactory(pictureBuffer)
         .rotate()
         .resize(500, 500, { fit: 'cover' })
         .webp({ quality: 85 })
-        .toFile(coverPath)
+        .toBuffer()
 
-      await this.prisma.track.update({
-        where: { id: trackId },
-        data: { coverPath },
-      })
-      return coverPath
-    } catch (_e) {
+      const objectKey = `${coverBaseObjectKey}.webp`
+
+      await this.storageService.uploadBuffer('covers', objectKey, webpBuffer, 'image/webp')
+      await this.persistCoverAsset(trackId, objectKey, 'image/webp', webpBuffer.byteLength)
+      return objectKey
+    } catch (error) {
       this.logger.warn(
-        `Cover save failed for track ${trackId}, trying raw fallback: ${
-          _e instanceof Error ? _e.message : String(_e)
-        }`,
+        `Cover optimize failed for track ${trackId}: ${error instanceof Error ? error.message : String(error)}`,
       )
-      try {
-        const coverDir = path.join(this.storagePath, 'stations', stationId, 'covers')
-        fs.mkdirSync(coverDir, { recursive: true })
+    }
 
-        const ext = this.getImageExtension(picture?.format)
-        const fallbackPath = path.join(coverDir, `${trackId}${ext}`)
-        fs.writeFileSync(fallbackPath, Buffer.from(picture.data))
+    try {
+      const ext = this.getImageExtension(picture.format)
+      const objectKey = `${coverBaseObjectKey}${ext}`
+      const mimeType = this.getMimeTypeByExt(`cover${ext}`, 'image/jpeg')
 
-        await this.prisma.track.update({
-          where: { id: trackId },
-          data: { coverPath: fallbackPath },
-        })
-        return fallbackPath
-      } catch (fallbackError: any) {
-        this.logger.warn(
-          `Raw cover fallback failed for track ${trackId}: ${
-            fallbackError?.message ?? String(fallbackError)
-          }`,
-        )
+      await this.storageService.uploadBuffer('covers', objectKey, pictureBuffer, mimeType)
+      await this.persistCoverAsset(trackId, objectKey, mimeType, pictureBuffer.byteLength)
+      return objectKey
+    } catch (error) {
+      this.logger.warn(
+        `Cover save failed for track ${trackId}: ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return null
+    }
+  }
+
+  private async persistCoverAsset(
+    trackId: string,
+    objectKey: string,
+    mimeType: string,
+    byteSize: number,
+  ) {
+    await this.prisma.$transaction(async (tx) => {
+      await tx.track.update({
+        where: { id: trackId },
+        data: { coverPath: objectKey },
+      })
+      await tx.trackAsset.upsert({
+        where: {
+          trackId_kind: {
+            trackId,
+            kind: TrackAssetKind.COVER_WEBP,
+          },
+        },
+        create: {
+          trackId,
+          kind: TrackAssetKind.COVER_WEBP,
+          objectKey,
+          mimeType,
+          byteSize,
+        },
+        update: {
+          objectKey,
+          mimeType,
+          byteSize,
+        },
+      })
+    })
+  }
+
+  private async deleteTrackAssets(track: {
+    id: string
+    originalPath: string
+    highPath: string | null
+    mediumPath: string | null
+    lowPath: string | null
+    coverPath: string | null
+    assets: Array<{ kind: TrackAssetKind; objectKey: string }>
+  }) {
+    const deletions: Array<{ scope: StorageScope; key: string }> = []
+
+    for (const asset of track.assets) {
+      const scope = this.scopeByAssetKind(asset.kind)
+      if (!scope) continue
+      deletions.push({ scope, key: asset.objectKey })
+    }
+
+    if (track.originalPath) deletions.push({ scope: 'tracks', key: track.originalPath })
+    if (track.highPath) deletions.push({ scope: 'transcodes', key: track.highPath })
+    if (track.mediumPath) deletions.push({ scope: 'transcodes', key: track.mediumPath })
+    if (track.lowPath) deletions.push({ scope: 'transcodes', key: track.lowPath })
+    if (track.coverPath) deletions.push({ scope: 'covers', key: track.coverPath })
+
+    const unique = new Map<string, { scope: StorageScope; key: string }>()
+    for (const item of deletions) {
+      unique.set(`${item.scope}:${item.key}`, item)
+    }
+
+    await Promise.all(
+      [...unique.values()].map((item) =>
+        this.storageService.deleteObject(item.scope, item.key).catch(() => undefined),
+      ),
+    )
+  }
+
+  private scopeByAssetKind(kind: TrackAssetKind): StorageScope | null {
+    switch (kind) {
+      case TrackAssetKind.ORIGINAL:
+        return 'tracks'
+      case TrackAssetKind.COVER_WEBP:
+        return 'covers'
+      case TrackAssetKind.TRANSCODE_LOW:
+      case TrackAssetKind.TRANSCODE_MEDIUM:
+      case TrackAssetKind.TRANSCODE_HIGH:
+      case TrackAssetKind.WAVEFORM_JSON:
+        return 'transcodes'
+      default:
         return null
+    }
+  }
+
+  private safeDeleteTempFile(filePath?: string) {
+    try {
+      if (!filePath) return
+      if (!path.isAbsolute(filePath)) return
+      if (filePath.startsWith('/tmp/') || filePath.includes(`${path.sep}pine-uploads${path.sep}`)) {
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
       }
+    } catch {
+      // best effort temp cleanup
     }
   }
 
-  private getMimeType(filePath: string): string {
-    const ext = path.extname(filePath).toLowerCase()
-    const map: Record<string, string> = {
-      '.mp3': 'audio/mpeg',
-      '.flac': 'audio/flac',
-      '.wav': 'audio/wav',
-      '.aac': 'audio/aac',
-      '.ogg': 'audio/ogg',
-      '.m4a': 'audio/mp4',
-    }
-    return map[ext] ?? 'audio/mpeg'
-  }
-
-  private getImageExtension(format?: string | null): string {
-    const f = String(format ?? '').toLowerCase()
-    if (f.includes('png')) return '.png'
-    if (f.includes('webp')) return '.webp'
-    if (f.includes('gif')) return '.gif'
-    if (f.includes('bmp')) return '.bmp'
-    return '.jpg'
-  }
-
-  private getImageMimeType(filePath: string): string {
+  private getMimeTypeByExt(filePath: string, fallback: string) {
     const ext = path.extname(filePath).toLowerCase()
     const map: Record<string, string> = {
       '.jpg': 'image/jpeg',
@@ -458,7 +447,33 @@ export class TracksService {
       '.gif': 'image/gif',
       '.bmp': 'image/bmp',
     }
-    return map[ext] ?? 'application/octet-stream'
+    return map[ext] ?? fallback
+  }
+
+  private getImageExtension(format?: string | null) {
+    const normalized = (format ?? '').trim().toLowerCase()
+    if (!normalized) return '.jpg'
+    if (normalized.includes('png')) return '.png'
+    if (normalized.includes('webp')) return '.webp'
+    if (normalized.includes('gif')) return '.gif'
+    if (normalized.includes('bmp')) return '.bmp'
+    return '.jpg'
+  }
+
+  private async resolveSharpFactory() {
+    const sharpModule = (await import('sharp')) as any
+    const sharpFactory =
+      typeof sharpModule === 'function'
+        ? sharpModule
+        : typeof sharpModule?.default === 'function'
+          ? sharpModule.default
+          : null
+
+    if (!sharpFactory) {
+      throw new Error('sharp module is not callable')
+    }
+
+    return sharpFactory as (input: Buffer) => any
   }
 
   private async getUserUsedStorageBytes(userId: string) {
@@ -468,26 +483,6 @@ export class TracksService {
     })
 
     return usage._sum.fileSize ?? 0
-  }
-
-  private safeDeleteFile(filePath?: string) {
-    try {
-      const safePath = this.resolveSafeStorageFilePath(filePath)
-      if (safePath && fs.existsSync(safePath)) {
-        fs.unlinkSync(safePath)
-      }
-    } catch (_e) {
-      // best effort cleanup
-    }
-  }
-
-  private resolveSafeStorageFilePath(filePath?: string | null): string | null {
-    if (!filePath) return null
-    const resolved = path.resolve(filePath)
-    if (resolved === this.storagePath || resolved.startsWith(`${this.storagePath}${path.sep}`)) {
-      return resolved
-    }
-    return null
   }
 
   private async assertStationMember(stationId: string, userId: string) {

@@ -13,43 +13,18 @@ import { Server, Socket } from 'socket.io'
 import { JwtService } from '@nestjs/jwt'
 import { ConfigService } from '@nestjs/config'
 import { Logger } from '@nestjs/common'
-import * as fs from 'fs'
-import * as path from 'path'
+import { PlaybackLoopMode } from '@prisma/client'
 import { PrismaService } from '../../prisma/prisma.service'
 import { QueueService } from '../queue/queue.service'
 import { ChatService } from '../chat/chat.service'
-import { MembersService } from '../members/members.service'
 import { StationsService } from '../stations/stations.service'
-import {
-  WS_EVENTS,
-  ChatMessageType,
-  MemberRole,
-  Permission,
-  PLAYBACK_SYNC_INTERVAL_MS,
-  SystemQueueMode,
-} from '@web-radio/shared'
+import { WS_EVENTS_V2, ChatMessageType } from '@web-radio/shared'
 import { isAllowedOrigin, resolveAllowedOrigins } from '../../common/security/cors'
 
 interface AuthSocket extends Socket {
   userId?: string
   username?: string
   stationId?: string
-}
-
-type PlaybackSyncType = 'heartbeat' | 'control'
-
-interface PlaybackState {
-  currentTrackId: string | null
-  currentQueueItemId: string | null
-  currentQueueType: 'USER' | 'SYSTEM' | null
-  currentTrackDuration: number
-  trackStartedAt: number | null
-  isPaused: boolean
-  pausedPosition: number
-  position: number
-  loopMode: 'none' | 'track' | 'queue'
-  shuffleEnabled: boolean
-  history: Array<{ trackId: string; queueItemId: string }>
 }
 
 const gatewayAllowedOrigins = resolveAllowedOrigins(
@@ -82,15 +57,6 @@ export class StationGateway
   private stationSockets = new Map<string, Set<string>>()
   // Map: socketId → { userId, stationId }
   private socketMeta = new Map<string, { userId: string; stationId: string }>()
-  // Map: stationId → playback state
-  private playbackStates = new Map<string, PlaybackState>()
-  // Sync intervals
-  private syncIntervals = new Map<string, NodeJS.Timeout>()
-  // Track-end timers for automatic autoplay advance
-  private trackEndTimers = new Map<string, NodeJS.Timeout>()
-  // Sequential lock per station for playback mutations
-  private playbackLocks = new Map<string, Promise<unknown>>()
-  private readonly storagePath: string
 
   constructor(
     private jwtService: JwtService,
@@ -98,16 +64,11 @@ export class StationGateway
     private prisma: PrismaService,
     private queueService: QueueService,
     private chatService: ChatService,
-    private membersService: MembersService,
     private stationsService: StationsService,
-  ) {
-    this.storagePath = path.resolve(
-      this.configService.get<string>('STORAGE_PATH', './storage'),
-    )
-  }
+  ) {}
 
   afterInit() {
-    this.logger.log('WebSocket Gateway initialized')
+    this.logger.log('WebSocket Gateway (v2) initialized')
   }
 
   async handleConnection(client: AuthSocket) {
@@ -124,45 +85,15 @@ export class StationGateway
         client.username = payload.username
       }
     } catch {
-      // Anonymous connection
+      // Anonymous connection is allowed, but joining requires auth.
     }
   }
 
   async handleDisconnect(client: AuthSocket) {
-    const meta = this.socketMeta.get(client.id)
-    if (!meta) return
-
-    const { stationId, userId } = meta
-    this.socketMeta.delete(client.id)
-
-    const sockets = this.stationSockets.get(stationId)
-    if (sockets) {
-      sockets.delete(client.id)
-      if (sockets.size === 0) {
-        this.stationSockets.delete(stationId)
-        this.stopSyncInterval(stationId)
-      }
-    }
-
-    // Notify other listeners
-    this.server.to(stationId).emit(WS_EVENTS.LISTENER_LEFT, {
-      userId,
-      username: client.username,
-      listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
-    })
-
-    // System chat message
-    if (client.username) {
-      const msg = await this.chatService.createSystemMessage(
-        stationId,
-        `${client.username} left the station`,
-        ChatMessageType.USER_LEFT,
-      )
-      this.server.to(stationId).emit(WS_EVENTS.CHAT_MESSAGE, msg)
-    }
+    await this.removeSocketFromStation(client)
   }
 
-  @SubscribeMessage(WS_EVENTS.STATION_JOIN)
+  @SubscribeMessage(WS_EVENTS_V2.STATION_JOIN)
   async handleJoin(
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() data: { code: string; password?: string },
@@ -179,36 +110,26 @@ export class StationGateway
     const station = await this.prisma.station.findUnique({ where: { code: data.code } })
     if (!station) throw new WsException('Station not found')
 
-    // Join socket room
     await client.join(station.id)
     client.stationId = station.id
 
     this.socketMeta.set(client.id, { userId: client.userId, stationId: station.id })
-
     if (!this.stationSockets.has(station.id)) {
       this.stationSockets.set(station.id, new Set())
     }
     this.stationSockets.get(station.id)!.add(client.id)
 
-    // Set station live
-    await this.stationsService.setLive(station.id, true)
+    await this.stationsService.setLive(station.id, true).catch(() => undefined)
 
-    // Start sync interval if not already running
-    if (!this.syncIntervals.has(station.id)) {
-      this.startSyncInterval(station.id)
-    }
+    const state = await this.buildStationState(station.id)
+    client.emit(WS_EVENTS_V2.STATION_STATE, state)
 
     const member = await this.prisma.stationMember.findUnique({
       where: { stationId_userId: { stationId: station.id, userId: client.userId } },
       include: { user: { select: { id: true, username: true, avatar: true } } },
     })
 
-    // Send full state to new client
-    const state = await this.buildStationState(station.id)
-    client.emit(WS_EVENTS.STATION_STATE, state)
-
-    // Notify others
-    this.server.to(station.id).except(client.id).emit(WS_EVENTS.LISTENER_JOINED, {
+    this.server.to(station.id).except(client.id).emit(WS_EVENTS_V2.LISTENER_JOINED, {
       userId: client.userId,
       username: client.username,
       listenerCount: this.stationSockets.get(station.id)?.size ?? 1,
@@ -225,292 +146,22 @@ export class StationGateway
         : null,
     })
 
-    // System chat message
     const msg = await this.chatService.createSystemMessage(
       station.id,
       `${client.username ?? 'Anonymous'} joined the station`,
       ChatMessageType.USER_JOINED,
     )
-    this.server.to(station.id).emit(WS_EVENTS.CHAT_MESSAGE, msg)
+    this.server.to(station.id).emit(WS_EVENTS_V2.CHAT_MESSAGE, msg)
 
     return { success: true, stationId: station.id }
   }
 
-  @SubscribeMessage(WS_EVENTS.STATION_LEAVE)
+  @SubscribeMessage(WS_EVENTS_V2.STATION_LEAVE)
   async handleLeave(@ConnectedSocket() client: AuthSocket) {
-    if (!client.stationId) return
-    await client.leave(client.stationId)
-    await this.handleDisconnect(client)
+    await this.removeSocketFromStation(client)
   }
 
-  @SubscribeMessage(WS_EVENTS.PLAYBACK_CONTROL)
-  async handlePlaybackControl(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody() data: { action: string; position?: number; value?: string },
-  ) {
-    if (!client.userId || !client.stationId) throw new WsException('Not in a station')
-
-    const hasPermission = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.PLAYBACK_CONTROL,
-    )
-    if (!hasPermission) throw new WsException('No permission')
-    const stationId = client.stationId
-
-    await this.withPlaybackLock(stationId, async () => {
-      const state = this.getOrCreatePlaybackState(stationId)
-
-      switch (data.action) {
-        case 'play':
-          if (!state.currentTrackId) {
-            await this.handleSkipUnsafe(stationId, 'control')
-            return
-          }
-          state.isPaused = false
-          state.trackStartedAt = Date.now() - state.pausedPosition * 1000
-          this.scheduleTrackEnd(stationId)
-          await this.prisma.station.update({
-            where: { id: stationId },
-            data: {
-              isPaused: false,
-              currentPosition: state.pausedPosition,
-              trackStartedAt: new Date(state.trackStartedAt),
-            },
-          })
-          break
-
-        case 'pause':
-          state.pausedPosition = this.getPlaybackPosition(state)
-          state.isPaused = true
-          state.trackStartedAt = null
-          this.clearTrackEndTimer(stationId)
-          await this.prisma.station.update({
-            where: { id: stationId },
-            data: {
-              isPaused: true,
-              pausedPosition: state.pausedPosition,
-              currentPosition: state.pausedPosition,
-              trackStartedAt: null,
-            },
-          })
-          break
-
-        case 'seek':
-          if (data.position !== undefined) {
-            const nextPosition = Math.max(0, data.position)
-            state.pausedPosition = nextPosition
-            if (state.isPaused) {
-              state.trackStartedAt = null
-              this.clearTrackEndTimer(stationId)
-            } else {
-              state.trackStartedAt = Date.now() - nextPosition * 1000
-              this.scheduleTrackEnd(stationId)
-            }
-            await this.prisma.station.update({
-              where: { id: stationId },
-              data: {
-                currentPosition: nextPosition,
-                pausedPosition: nextPosition,
-                isPaused: state.isPaused,
-                trackStartedAt: state.trackStartedAt ? new Date(state.trackStartedAt) : null,
-              },
-            })
-          }
-          break
-
-        case 'prev': {
-          const currentPos = this.getPlaybackPosition(state)
-
-          if (state.history.length > 0 && currentPos <= 3) {
-            // Return the current playing item back to queue as pending,
-            // so it is not lost when going back to previous.
-            if (state.currentQueueItemId) {
-              await this.queueService.requeuePlayingItem(state.currentQueueItemId)
-            }
-
-            // Go to previous track
-            const prev = state.history.pop()!
-            const started = await this.playTrack(
-              client.stationId!,
-              prev.trackId,
-              prev.queueItemId,
-              false,
-            )
-            if (!started) {
-              await this.handleSkipUnsafe(stationId, 'control')
-            }
-            return
-          }
-
-          // Fallback for server restart cases:
-          // if in-memory history is empty and user queue has no pending items,
-          // try to go back within the system queue using the latest played SYSTEM item.
-          if (state.history.length === 0 && currentPos <= 3) {
-            const hasUserPending = await this.queueService.hasPendingUserQueue(stationId)
-            if (!hasUserPending) {
-              const previousSystem = await this.queueService.getPreviousSystemTrack(stationId)
-              if (previousSystem) {
-                if (state.currentQueueItemId) {
-                  await this.queueService.requeuePlayingItem(state.currentQueueItemId)
-                }
-                const started = await this.playTrack(
-                  stationId,
-                  previousSystem.trackId,
-                  previousSystem.queueItemId,
-                  false,
-                )
-                if (!started) {
-                  await this.handleSkipUnsafe(stationId, 'control')
-                }
-                return
-              }
-            }
-          }
-
-          // Restart current track from 0 — emit TRACK_CHANGED to force client Howl reload
-          if (state.currentTrackId) {
-            const track = await this.prisma.track.findUnique({
-              where: { id: state.currentTrackId },
-              include: { uploadedBy: { select: { id: true, username: true, avatar: true } } },
-            })
-            if (track) {
-              state.trackStartedAt = Date.now()
-              state.isPaused = false
-              state.pausedPosition = 0
-              state.currentTrackDuration = track.duration ?? 0
-              this.scheduleTrackEnd(stationId)
-              await this.prisma.station.update({
-                where: { id: stationId },
-                data: { currentPosition: 0, trackStartedAt: new Date(), isPaused: false },
-              })
-              const queue = await this.queueService.getQueue(stationId)
-              this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, {
-                track: {
-                  id: track.id, title: track.title, artist: track.artist,
-                  album: track.album, year: track.year, genre: track.genre,
-                  duration: track.duration, hasCover: !!track.coverPath,
-                  quality: track.quality, uploadedBy: track.uploadedBy,
-                },
-                trackStartedAt: state.trackStartedAt,
-                currentQueueType: state.currentQueueType,
-                queue,
-                serverTime: Date.now(),
-                syncType: 'track_changed',
-              })
-              return
-            }
-          }
-          break
-        }
-
-        case 'set_loop':
-          if (data.value === 'none' || data.value === 'track' || data.value === 'queue') {
-            state.loopMode = data.value
-          }
-          break
-
-        case 'set_shuffle':
-          state.shuffleEnabled = !state.shuffleEnabled
-          await this.prisma.station.update({
-            where: { id: stationId },
-            data: {
-              systemQueueMode: state.shuffleEnabled
-                ? SystemQueueMode.SHUFFLE
-                : SystemQueueMode.SEQUENTIAL,
-            },
-          })
-          await this.queueService.rebuildSystemQueue(stationId)
-          this.server.to(stationId).emit(WS_EVENTS.QUEUE_UPDATED, {
-            queue: await this.queueService.getQueue(stationId),
-          })
-          break
-
-        case 'skip':
-          await this.handleSkipUnsafe(stationId, 'control')
-          return
-      }
-
-      this.emitPlaybackSync(stationId, state, 'control')
-    })
-  }
-
-  @SubscribeMessage(WS_EVENTS.QUEUE_ADD)
-  async handleQueueAdd(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody()
-    data: { trackId: string; mode?: 'end' | 'next' | 'now'; beforeItemId?: string },
-  ) {
-    if (!client.userId || !client.stationId) throw new WsException('Not in a station')
-
-    const hasPermission = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.ADD_TO_QUEUE,
-    )
-    if (!hasPermission) throw new WsException('No permission')
-
-    await this.queueService.addToQueue(client.stationId, data.trackId, client.userId, {
-      mode: data.mode,
-      beforeItemId: data.beforeItemId,
-    })
-    const queue = await this.queueService.getQueue(client.stationId)
-
-    this.server.to(client.stationId).emit(WS_EVENTS.QUEUE_UPDATED, { queue })
-
-    // System message
-    const track = await this.prisma.track.findUnique({ where: { id: data.trackId } })
-    if (track) {
-      const msg = await this.chatService.createSystemMessage(
-        client.stationId,
-        `${client.username} added "${track.title ?? track.filename}" to queue`,
-        ChatMessageType.TRACK_ADDED,
-        { trackId: data.trackId, addedBy: client.username },
-      )
-      this.server.to(client.stationId).emit(WS_EVENTS.CHAT_MESSAGE, msg)
-    }
-
-    // Force immediate play if requested; otherwise start only when idle
-    if (data.mode === 'now') {
-      await this.handleSkip(client.stationId)
-    } else if (!this.getOrCreatePlaybackState(client.stationId).currentTrackId) {
-      await this.handleSkip(client.stationId)
-    }
-  }
-
-  @SubscribeMessage(WS_EVENTS.QUEUE_REORDER)
-  async handleQueueReorder(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody() data: { items: Array<{ id: string; position: number }> },
-  ) {
-    if (!client.userId || !client.stationId) throw new WsException('Not in a station')
-
-    const hasPermission = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.REORDER_QUEUE,
-    )
-    if (!hasPermission) throw new WsException('No permission')
-
-    const queue = await this.queueService.reorderQueue(client.stationId, data.items)
-    this.server.to(client.stationId).emit(WS_EVENTS.QUEUE_UPDATED, { queue })
-  }
-
-  @SubscribeMessage(WS_EVENTS.QUEUE_SKIP)
-  async handleQueueSkip(@ConnectedSocket() client: AuthSocket) {
-    if (!client.userId || !client.stationId) throw new WsException('Not in a station')
-
-    const hasPermission = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.SKIP_TRACK,
-    )
-    if (!hasPermission) throw new WsException('No permission')
-
-    await this.handleSkip(client.stationId, 'control')
-  }
-
-  @SubscribeMessage(WS_EVENTS.TIME_SYNC)
+  @SubscribeMessage(WS_EVENTS_V2.TIME_SYNC)
   handleTimeSync(@MessageBody() data: { clientTs?: number }) {
     return {
       clientTs: data?.clientTs,
@@ -518,57 +169,7 @@ export class StationGateway
     }
   }
 
-  @SubscribeMessage(WS_EVENTS.TRACK_ENDED)
-  async handleTrackEnded(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody() data: { trackId?: string },
-  ) {
-    // Server is the only authoritative source for track-end transitions.
-    // Ignore client-originated track-ended messages to prevent race conditions.
-    void data
-    if (!client.stationId) return
-  }
-
-  @SubscribeMessage(WS_EVENTS.QUEUE_REMOVE)
-  async handleQueueRemove(
-    @ConnectedSocket() client: AuthSocket,
-    @MessageBody() data: { itemId: string },
-  ) {
-    if (!client.userId || !client.stationId) throw new WsException('Not in a station')
-
-    const item = await this.prisma.queueItem.findUnique({
-      where: { id: data.itemId },
-      select: { stationId: true, addedById: true },
-    })
-    if (!item || item.stationId !== client.stationId) {
-      throw new WsException('Queue item not found')
-    }
-
-    const canRemove = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.REMOVE_FROM_QUEUE,
-    )
-    const canReorder = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.REORDER_QUEUE,
-    )
-    const canAdd = await this.membersService.hasPermission(
-      client.stationId,
-      client.userId,
-      Permission.ADD_TO_QUEUE,
-    )
-    const isOwnItem = item.addedById === client.userId
-    if (!canRemove && !canReorder && !canAdd && !isOwnItem) throw new WsException('No permission')
-
-    await this.queueService.removeFromQueue(client.stationId, data.itemId)
-    this.server.to(client.stationId).emit(WS_EVENTS.QUEUE_UPDATED, {
-      queue: await this.queueService.getQueue(client.stationId),
-    })
-  }
-
-  @SubscribeMessage(WS_EVENTS.CHAT_SEND)
+  @SubscribeMessage(WS_EVENTS_V2.CHAT_SEND)
   async handleChatSend(
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() data: { content: string },
@@ -581,269 +182,56 @@ export class StationGateway
       client.userId,
       data.content.trim(),
     )
-    this.server.to(client.stationId).emit(WS_EVENTS.CHAT_MESSAGE, msg)
+    this.server.to(client.stationId).emit(WS_EVENTS_V2.CHAT_MESSAGE, msg)
   }
 
-  @SubscribeMessage(WS_EVENTS.HEARTBEAT)
+  @SubscribeMessage(WS_EVENTS_V2.HEARTBEAT)
   handleHeartbeat(@ConnectedSocket() client: AuthSocket) {
     if (client.userId) {
-      this.prisma.user.update({
-        where: { id: client.userId },
-        data: { lastSeenAt: new Date() },
-      }).catch(() => {})
+      this.prisma.user
+        .update({ where: { id: client.userId }, data: { lastSeenAt: new Date() } })
+        .catch(() => undefined)
     }
     return { ok: true }
   }
 
-  // ─── Internal ─────────────────────────────────────────────────────────────────
+  private async removeSocketFromStation(client: AuthSocket) {
+    const meta = this.socketMeta.get(client.id)
+    if (!meta) return
 
-  private withPlaybackLock<T>(stationId: string, task: () => Promise<T>) {
-    const previous = this.playbackLocks.get(stationId) ?? Promise.resolve()
-    let current: Promise<T>
-    current = previous
-      .catch(() => undefined)
-      .then(() => task())
-      .finally(() => {
-        if (this.playbackLocks.get(stationId) === current) {
-          this.playbackLocks.delete(stationId)
-        }
-      })
+    const { stationId, userId } = meta
+    this.socketMeta.delete(client.id)
+    client.stationId = undefined
 
-    this.playbackLocks.set(stationId, current)
-    return current
-  }
-
-  private getPlaybackPosition(state: PlaybackState) {
-    if (state.isPaused) return Math.max(0, state.pausedPosition)
-    if (!state.trackStartedAt) return Math.max(0, state.pausedPosition)
-    return Math.max(0, (Date.now() - state.trackStartedAt) / 1000)
-  }
-
-  private emitPlaybackSync(
-    stationId: string,
-    state: PlaybackState,
-    syncType: PlaybackSyncType = 'heartbeat',
-  ) {
-    this.server.to(stationId).emit(WS_EVENTS.PLAYBACK_SYNC, {
-      currentTrackId: state.currentTrackId,
-      currentQueueType: state.currentQueueType,
-      position: this.getPlaybackPosition(state),
-      isPaused: state.isPaused,
-      trackStartedAt: state.trackStartedAt,
-      loopMode: state.loopMode,
-      shuffleEnabled: state.shuffleEnabled,
-      serverTime: Date.now(),
-      syncType,
-    })
-  }
-
-  private async handleSkip(stationId: string, syncType: PlaybackSyncType = 'heartbeat') {
-    await this.withPlaybackLock(stationId, () => this.handleSkipUnsafe(stationId, syncType))
-  }
-
-  private async handleSkipUnsafe(
-    stationId: string,
-    syncType: PlaybackSyncType = 'heartbeat',
-  ) {
-    const state = this.getOrCreatePlaybackState(stationId)
-    this.clearTrackEndTimer(stationId)
-
-    // Loop track: restart current instead of advancing
-    if (state.loopMode === 'track' && state.currentTrackId && state.currentQueueItemId) {
-      state.trackStartedAt = Date.now()
-      state.pausedPosition = 0
-      this.scheduleTrackEnd(stationId)
-      this.emitPlaybackSync(stationId, state, syncType)
-      return
+    try {
+      await client.leave(stationId)
+    } catch {
+      // no-op, socket may already be detached
     }
 
-    // Mark current item as played (history is saved in playTrack)
-    if (state.currentQueueItemId) {
-      await this.queueService.markPlayed(state.currentQueueItemId).catch(() => undefined)
-    }
-
-    let rebuiltSystemQueue = false
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const next = await this.queueService.getNextTrack(stationId)
-      if (!next) {
-        if (rebuiltSystemQueue) break
-        await this.queueService.rebuildSystemQueue(stationId)
-        rebuiltSystemQueue = true
-        continue
+    const sockets = this.stationSockets.get(stationId)
+    if (sockets) {
+      sockets.delete(client.id)
+      if (sockets.size === 0) {
+        this.stationSockets.delete(stationId)
+        await this.stationsService.setLive(stationId, false).catch(() => undefined)
       }
-
-      const started = await this.playTrack(stationId, next.trackId, next.queueItemId)
-      if (started) return
     }
 
-    // Nothing playable left
-    state.currentTrackId = null
-    state.currentQueueItemId = null
-    state.currentQueueType = null
-    state.currentTrackDuration = 0
-    state.trackStartedAt = null
-    state.isPaused = false
-    state.pausedPosition = 0
-
-    await this.prisma.station.update({
-      where: { id: stationId },
-      data: { currentTrackId: null, currentPosition: 0, trackStartedAt: null, isPaused: false },
+    this.server.to(stationId).emit(WS_EVENTS_V2.LISTENER_LEFT, {
+      userId,
+      username: client.username,
+      listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
     })
 
-    this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, {
-      track: null,
-      serverTime: Date.now(),
-      syncType: 'track_changed',
-    })
-  }
-
-  private async playTrack(
-    stationId: string,
-    trackId: string,
-    queueItemId: string,
-    addToHistory = true,
-  ): Promise<boolean> {
-    const state = this.getOrCreatePlaybackState(stationId)
-    const queueItem = await this.prisma.queueItem.findUnique({
-      where: { id: queueItemId },
-      select: { queueType: true },
-    })
-    const track = await this.prisma.track.findUnique({
-      where: { id: trackId },
-      include: {
-        uploadedBy: { select: { id: true, username: true, avatar: true } },
-      },
-    })
-
-    if (!track) {
-      await this.queueService.removeFromQueue(stationId, queueItemId).catch(() => undefined)
-      return false
-    }
-
-    if (!this.isTrackFileAvailable(track.originalPath)) {
-      this.logger.warn(
-        `Skipping broken track ${track.id} in station ${stationId}: file not found at ${track.originalPath}`,
+    if (client.username) {
+      const msg = await this.chatService.createSystemMessage(
+        stationId,
+        `${client.username} left the station`,
+        ChatMessageType.USER_LEFT,
       )
-      await this.cleanupBrokenTrack(stationId, track.id, queueItemId)
-      return false
+      this.server.to(stationId).emit(WS_EVENTS_V2.CHAT_MESSAGE, msg)
     }
-
-    await this.queueService.markPlaying(queueItemId)
-
-    // Save current to history before switching (unless called from prev)
-    if (addToHistory && state.currentTrackId && state.currentQueueItemId) {
-      state.history.push({ trackId: state.currentTrackId, queueItemId: state.currentQueueItemId })
-      if (state.history.length > 50) state.history.shift()
-    }
-
-    state.currentTrackId = trackId
-    state.currentQueueItemId = queueItemId
-    state.currentQueueType = (queueItem?.queueType as 'USER' | 'SYSTEM' | undefined) ?? null
-    state.currentTrackDuration = track.duration ?? 0
-    state.trackStartedAt = Date.now()
-    state.isPaused = false
-    state.pausedPosition = 0
-    this.scheduleTrackEnd(stationId)
-
-    await this.prisma.station.update({
-      where: { id: stationId },
-      data: {
-        currentTrackId: trackId,
-        currentPosition: 0,
-        trackStartedAt: new Date(),
-        isPaused: false,
-      },
-    })
-
-    const queue = await this.queueService.getQueue(stationId)
-
-    this.server.to(stationId).emit(WS_EVENTS.TRACK_CHANGED, {
-      track: {
-        id: track.id,
-        title: track.title,
-        artist: track.artist,
-        album: track.album,
-        year: track.year,
-        genre: track.genre,
-        duration: track.duration,
-        hasCover: !!track.coverPath,
-        quality: track.quality,
-        uploadedBy: track.uploadedBy,
-      },
-      trackStartedAt: state.trackStartedAt,
-      currentQueueType: state.currentQueueType,
-      queue,
-      serverTime: Date.now(),
-      syncType: 'track_changed',
-    })
-    return true
-  }
-
-  private startSyncInterval(stationId: string) {
-    const interval = setInterval(async () => {
-      const state = this.playbackStates.get(stationId)
-      if (!state || !state.currentTrackId) return
-
-      this.emitPlaybackSync(stationId, state)
-    }, PLAYBACK_SYNC_INTERVAL_MS)
-
-    this.syncIntervals.set(stationId, interval)
-  }
-
-  private stopSyncInterval(stationId: string) {
-    const interval = this.syncIntervals.get(stationId)
-    if (interval) {
-      clearInterval(interval)
-      this.syncIntervals.delete(stationId)
-    }
-  }
-
-  private getOrCreatePlaybackState(stationId: string): PlaybackState {
-    if (!this.playbackStates.has(stationId)) {
-      this.playbackStates.set(stationId, {
-        currentTrackId: null,
-        currentQueueItemId: null,
-        currentQueueType: null,
-        currentTrackDuration: 0,
-        trackStartedAt: null,
-        isPaused: false,
-        pausedPosition: 0,
-        position: 0,
-        loopMode: 'none',
-        shuffleEnabled: false,
-        history: [],
-      })
-    }
-    return this.playbackStates.get(stationId)!
-  }
-
-  private clearTrackEndTimer(stationId: string) {
-    const timer = this.trackEndTimers.get(stationId)
-    if (timer) {
-      clearTimeout(timer)
-      this.trackEndTimers.delete(stationId)
-    }
-  }
-
-  private scheduleTrackEnd(stationId: string) {
-    const state = this.getOrCreatePlaybackState(stationId)
-    this.clearTrackEndTimer(stationId)
-
-    if (state.isPaused || !state.currentTrackId || state.currentTrackDuration <= 0) return
-
-    const position = state.trackStartedAt
-      ? (Date.now() - state.trackStartedAt) / 1000
-      : state.pausedPosition
-    const remainingMs = Math.max(0, (state.currentTrackDuration - position) * 1000)
-
-    const timer = setTimeout(async () => {
-      this.trackEndTimers.delete(stationId)
-      const latest = this.playbackStates.get(stationId)
-      if (!latest || latest.isPaused || !latest.currentTrackId) return
-      await this.handleSkip(stationId)
-    }, remainingMs + 120)
-
-    this.trackEndTimers.set(stationId, timer)
   }
 
   private async buildStationState(stationId: string) {
@@ -857,7 +245,7 @@ export class StationGateway
         },
       },
     })
-    if (!station) return null
+    if (!station) throw new WsException('Station not found')
 
     const queue = await this.queueService.getQueue(stationId)
     const onlineUserIds = this.getOnlineUserIds(stationId)
@@ -866,13 +254,32 @@ export class StationGateway
       include: { user: { select: { id: true, username: true, avatar: true } } },
       orderBy: { joinedAt: 'asc' },
     })
-    const state = this.getOrCreatePlaybackState(stationId)
-    state.shuffleEnabled = station.systemQueueMode !== SystemQueueMode.SEQUENTIAL
+
+    const playback = await this.prisma.playbackState.upsert({
+      where: { stationId },
+      create: {
+        stationId,
+        currentTrackId: null,
+        currentQueueItemId: null,
+        currentQueueType: null,
+        currentPosition: 0,
+        currentTrackDuration: 0,
+        trackStartedAt: null,
+        isPaused: true,
+        pausedPosition: 0,
+        loopMode: PlaybackLoopMode.NONE,
+        shuffleEnabled: station.systemQueueMode !== 'SEQUENTIAL',
+        lastSyncedAt: new Date(),
+      },
+      update: {
+        shuffleEnabled: station.systemQueueMode !== 'SEQUENTIAL',
+      },
+    })
 
     let currentTrack = null
-    if (state.currentTrackId) {
+    if (playback.currentTrackId) {
       currentTrack = await this.prisma.track.findUnique({
-        where: { id: state.currentTrackId },
+        where: { id: playback.currentTrackId },
         include: {
           uploadedBy: { select: { id: true, username: true, avatar: true } },
         },
@@ -896,12 +303,12 @@ export class StationGateway
         listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
       },
       currentTrack,
-      currentPosition: this.getPlaybackPosition(state),
-      isPaused: state.isPaused,
-      trackStartedAt: state.trackStartedAt,
-      currentQueueType: state.currentQueueType,
-      loopMode: state.loopMode,
-      shuffleEnabled: state.shuffleEnabled,
+      currentPosition: this.getPlaybackPosition(playback),
+      isPaused: playback.isPaused,
+      trackStartedAt: playback.trackStartedAt ? playback.trackStartedAt.getTime() : null,
+      currentQueueType: playback.currentQueueType,
+      loopMode: this.toClientLoopMode(playback.loopMode),
+      shuffleEnabled: playback.shuffleEnabled,
       queue,
       members: members.map((m) => ({
         id: m.id,
@@ -917,6 +324,32 @@ export class StationGateway
     }
   }
 
+  private getPlaybackPosition(playback: {
+    isPaused: boolean
+    pausedPosition: number
+    currentPosition: number
+    trackStartedAt: Date | null
+    currentTrackDuration: number
+  }) {
+    const position =
+      playback.isPaused || !playback.trackStartedAt
+        ? playback.pausedPosition || playback.currentPosition || 0
+        : (Date.now() - playback.trackStartedAt.getTime()) / 1000
+
+    const maxDuration = Math.max(playback.currentTrackDuration || 0, 0)
+    if (maxDuration > 0) {
+      return Math.max(0, Math.min(position, maxDuration))
+    }
+
+    return Math.max(0, position)
+  }
+
+  private toClientLoopMode(mode: PlaybackLoopMode) {
+    if (mode === PlaybackLoopMode.TRACK) return 'track'
+    if (mode === PlaybackLoopMode.QUEUE) return 'queue'
+    return 'none'
+  }
+
   private getOnlineUserIds(stationId: string) {
     const userIds = new Set<string>()
     const socketIds = this.stationSockets.get(stationId)
@@ -926,46 +359,11 @@ export class StationGateway
       const meta = this.socketMeta.get(socketId)
       if (meta?.userId) userIds.add(meta.userId)
     }
+
     return userIds
   }
 
-  private isTrackFileAvailable(filePath?: string | null) {
-    if (!filePath) return false
-    const resolved = path.resolve(filePath)
-    if (
-      resolved !== this.storagePath &&
-      !resolved.startsWith(`${this.storagePath}${path.sep}`)
-    ) {
-      return false
-    }
-    return fs.existsSync(resolved)
-  }
-
-  private async cleanupBrokenTrack(
-    stationId: string,
-    trackId: string,
-    queueItemId: string,
-  ) {
-    await this.prisma.$transaction(async (tx) => {
-      await tx.queueItem.deleteMany({
-        where: { OR: [{ id: queueItemId }, { trackId, stationId }] },
-      })
-      await tx.playlistTrack.deleteMany({ where: { trackId } })
-      await tx.track.deleteMany({ where: { id: trackId } })
-      await tx.station.updateMany({
-        where: { id: stationId, currentTrackId: trackId },
-        data: {
-          currentTrackId: null,
-          currentPosition: 0,
-          trackStartedAt: null,
-          isPaused: false,
-          pausedPosition: 0,
-        },
-      })
-    })
-  }
-
-  // Public method for broadcasting from HTTP controllers
+  // Public method for broadcasting from background services.
   broadcastToStation(stationId: string, event: string, data: any) {
     this.server.to(stationId).emit(event, data)
   }

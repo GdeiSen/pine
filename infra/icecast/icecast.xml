@@ -1,0 +1,43 @@
+<icecast>
+  <location>Earth</location>
+  <admin>admin@pine.local</admin>
+  <limits>
+    <clients>200</clients>
+    <sources>5</sources>
+    <threadpool>4</threadpool>
+    <queue-size>524288</queue-size>
+    <client-timeout>30</client-timeout>
+    <header-timeout>15</header-timeout>
+    <source-timeout>10</source-timeout>
+    <burst-on-connect>1</burst-on-connect>
+    <burst-size>65535</burst-size>
+  </limits>
+
+  <authentication>
+    <source-password>__ICECAST_SOURCE_PASSWORD__</source-password>
+    <relay-password>__ICECAST_RELAY_PASSWORD__</relay-password>
+    <admin-user>admin</admin-user>
+    <admin-password>__ICECAST_ADMIN_PASSWORD__</admin-password>
+  </authentication>
+
+  <hostname>__ICECAST_HOSTNAME__</hostname>
+  <listen-socket>
+    <port>8000</port>
+  </listen-socket>
+
+  <fileserve>1</fileserve>
+  <paths>
+    <basedir>/usr/share/icecast</basedir>
+    <logdir>/var/log/icecast</logdir>
+    <webroot>/web</webroot>
+    <adminroot>/admin</adminroot>
+    <alias source="/" dest="/status.xsl"/>
+  </paths>
+
+  <mount>
+    <mount-name>__ICECAST_MOUNT__</mount-name>
+    <burst-size>65535</burst-size>
+    <hidden>0</hidden>
+    <public>0</public>
+  </mount>
+</icecast>

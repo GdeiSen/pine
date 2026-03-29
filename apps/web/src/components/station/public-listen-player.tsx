@@ -1,12 +1,19 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ListenOnlyPlayerCard } from '@/components/station/listen-only-player-card'
 import { useAudioStore } from '@/stores/audio.store'
+import { useStationStore } from '@/stores/station.store'
+import { fetchStationStreamInfo } from '@/lib/api'
+import {
+  getEstimatedServerPosition,
+  getServerOffsetMs,
+  normalizeTrackStartedAt,
+  useRadioPlaybackEngine,
+} from '@/hooks/useRadioPlaybackEngine'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api'
 const POLL_INTERVAL_MS = 4000
-const SYNC_DRIFT_SECONDS = 1.2
 
 interface PublicListenState {
   code: string
@@ -31,51 +38,36 @@ interface PublicListenState {
   trackStartedAt?: string | null
   pausedPosition?: number
   serverTime?: string | null
-}
-
-function clampPosition(position: number, duration?: number | null): number {
-  if (!Number.isFinite(position)) return 0
-  const clamped = Math.max(0, position)
-  if (typeof duration === 'number' && duration > 0) {
-    return Math.min(clamped, duration)
-  }
-  return clamped
-}
-
-function getServerOffsetMs(serverTime?: string | null, referenceTimeMs = Date.now()): number | null {
-  if (!serverTime) return null
-  const serverTimeMs = Date.parse(serverTime)
-  if (Number.isNaN(serverTimeMs)) return null
-  return serverTimeMs - referenceTimeMs
-}
-
-function getServerPosition(state: PublicListenState, serverOffsetMs: number | null): number {
-  const duration = state.currentTrack?.duration
-  if (state.isPaused) {
-    return clampPosition(state.pausedPosition ?? state.currentPosition ?? 0, duration)
-  }
-
-  if (state.trackStartedAt) {
-    const startedAtMs = Date.parse(state.trackStartedAt)
-    if (!Number.isNaN(startedAtMs)) {
-      const serverNowMs = Date.now() + (serverOffsetMs ?? 0)
-      return clampPosition((serverNowMs - startedAtMs) / 1000, duration)
-    }
-  }
-
-  return clampPosition(state.currentPosition ?? 0, duration)
+  streamUrl?: string | null
 }
 
 export function PublicListenPlayer({ code, initialState }: { code: string; initialState: PublicListenState }) {
-  const [state, setState] = useState<PublicListenState>(initialState)
+  const [state, setState] = useState<PublicListenState>({
+    ...initialState,
+    streamUrl: initialState.streamUrl ?? null,
+  })
   const serverOffsetMsRef = useRef<number | null>(getServerOffsetMs(initialState.serverTime))
-  const [displayPosition, setDisplayPosition] = useState(() =>
-    getServerPosition(initialState, serverOffsetMsRef.current),
-  )
-  const [needsGesture, setNeedsGesture] = useState(false)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
-  const trackIdRef = useRef<string | null>(null)
   const volume = useAudioStore((s) => s.volume)
+  const setAudioConnection = useStationStore((s) => s.setAudioConnection)
+
+  const playback = useRadioPlaybackEngine({
+    streamUrl: state.streamUrl ?? null,
+    isPlaying: !!state.currentTrackId && !state.isPaused,
+    volume,
+  })
+
+  useEffect(() => {
+    setAudioConnection({
+      state: playback.audioConnectionState,
+      message: playback.audioConnectionMessage,
+      diagnostics: playback.audioDiagnostics,
+    })
+  }, [
+    playback.audioConnectionMessage,
+    playback.audioConnectionState,
+    playback.audioDiagnostics,
+    setAudioConnection,
+  ])
 
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -95,131 +87,65 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     }
 
     document.title = 'PINE'
-  }, [state.currentTrack?.id, state.currentTrack?.title, state.currentTrack?.artist, state.name])
+  }, [state.currentTrack?.artist, state.currentTrack?.id, state.currentTrack?.title, state.name])
 
   useEffect(() => {
     return () => {
       if (typeof document !== 'undefined') {
         document.title = 'PINE'
       }
+      setAudioConnection({
+        state: 'idle',
+        message: null,
+        diagnostics: null,
+      })
     }
-  }, [])
-
-  const hasTrackSource = useCallback((audio: HTMLAudioElement, trackId: string) => {
-    return audio.currentSrc.includes(`/tracks/${trackId}/stream`)
-  }, [])
-
-  const restartAudio = useCallback(async () => {
-    const audio = audioRef.current
-    if (!audio || !state.currentTrackId) return
-
-    audio.volume = volume
-
-    if (trackIdRef.current !== state.currentTrackId || !hasTrackSource(audio, state.currentTrackId)) {
-      trackIdRef.current = state.currentTrackId
-      audio.src = `${API_URL}/tracks/${state.currentTrackId}/stream?quality=LOW`
-      audio.load()
-      if (audio.readyState < 1) {
-        await new Promise<void>((resolve) => {
-          audio.addEventListener('loadedmetadata', () => resolve(), { once: true })
-        })
-      }
-    }
-
-    audio.currentTime = getServerPosition(state, serverOffsetMsRef.current)
-    try {
-      await audio.play()
-      setNeedsGesture(false)
-    } catch {
-      setNeedsGesture(true)
-    }
-  }, [hasTrackSource, state, volume])
-
-  const syncPlayback = useCallback(async (next: PublicListenState) => {
-    const audio = audioRef.current
-    if (!audio) return
-    audio.volume = volume
-
-    if (!next.currentTrackId) {
-      audio.pause()
-      trackIdRef.current = null
-      return
-    }
-
-    const serverPosition = getServerPosition(next, serverOffsetMsRef.current)
-    const isTrackChanged = trackIdRef.current !== next.currentTrackId
-    const isSourceMissing = !hasTrackSource(audio, next.currentTrackId)
-    const targetPosition = clampPosition(serverPosition, next.currentTrack?.duration)
-
-    if (isTrackChanged || isSourceMissing) {
-      trackIdRef.current = next.currentTrackId
-      audio.src = `${API_URL}/tracks/${next.currentTrackId}/stream?quality=LOW`
-      audio.load()
-      audio.currentTime = 0
-      audio.addEventListener(
-        'loadedmetadata',
-        () => {
-          audio.currentTime = targetPosition
-        },
-        { once: true },
-      )
-    } else {
-      const safeCurrentTime = clampPosition(audio.currentTime, next.currentTrack?.duration)
-      if (Math.abs(safeCurrentTime - targetPosition) > SYNC_DRIFT_SECONDS) {
-        audio.currentTime = targetPosition
-      }
-    }
-
-    if (next.isPaused) {
-      if (!audio.paused) audio.pause()
-      return
-    }
-
-    if (audio.paused) {
-      try {
-        await audio.play()
-        setNeedsGesture(false)
-      } catch {
-        setNeedsGesture(true)
-      }
-    }
-  }, [hasTrackSource, volume])
-
-  useEffect(() => {
-    const audio = audioRef.current
-    if (!audio) return
-    audio.volume = volume
-  }, [volume])
-
-  useEffect(() => {
-    void syncPlayback(state)
-  }, [state, syncPlayback])
+  }, [setAudioConnection])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setDisplayPosition(getServerPosition(state, serverOffsetMsRef.current))
+      setState((prev) => ({
+        ...prev,
+        currentPosition: getEstimatedServerPosition({
+          currentPosition: prev.currentPosition ?? 0,
+          duration: prev.currentTrack?.duration ?? 0,
+          isPaused: !!prev.isPaused,
+          pausedPosition: prev.pausedPosition,
+          serverOffsetMs: serverOffsetMsRef.current,
+          trackStartedAt: normalizeTrackStartedAt(prev.trackStartedAt),
+        }),
+      }))
     }, 250)
     return () => window.clearInterval(timer)
-  }, [state])
+  }, [])
 
   useEffect(() => {
     let cancelled = false
 
     const pullState = async () => {
       try {
-        const res = await fetch(`${API_URL}/stations/${code}`, { cache: 'no-store' })
-        if (!res.ok) return
-        const next = (await res.json()) as PublicListenState
+        const [stationResponse, streamInfo] = await Promise.all([
+          fetch(`${API_URL}/stations/${code}`, { cache: 'no-store' }),
+          fetchStationStreamInfo(code),
+        ])
+        if (!stationResponse.ok) return
+        const next = (await stationResponse.json()) as PublicListenState
         if (cancelled) return
         if (next.accessMode !== 'PUBLIC' || next.isPasswordProtected) return
 
-        const receivedAtMs = Date.now()
-        const offsetMs = getServerOffsetMs(next.serverTime, receivedAtMs)
+        const offsetMs = getServerOffsetMs(next.serverTime, Date.now())
         if (offsetMs !== null) {
           serverOffsetMsRef.current = offsetMs
         }
 
-        const nextPosition = getServerPosition(next, serverOffsetMsRef.current)
+        const nextPosition = getEstimatedServerPosition({
+          currentPosition: next.currentPosition ?? 0,
+          duration: next.currentTrack?.duration ?? 0,
+          isPaused: !!next.isPaused,
+          pausedPosition: next.pausedPosition,
+          serverOffsetMs: serverOffsetMsRef.current,
+          trackStartedAt: normalizeTrackStartedAt(next.trackStartedAt),
+        })
 
         setState((prev) => ({
           ...prev,
@@ -227,18 +153,26 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
           listenerCount: next.listenerCount ?? prev.listenerCount,
           currentTrackId: next.currentTrackId ?? null,
           currentTrack: next.currentTrack ?? null,
-          currentPosition: next.currentPosition ?? 0,
+          currentPosition: nextPosition,
           isPaused: next.isPaused ?? false,
           trackStartedAt: next.trackStartedAt ?? null,
           pausedPosition: next.pausedPosition ?? 0,
           serverTime: next.serverTime ?? prev.serverTime ?? null,
+          streamUrl: streamInfo?.streamUrl ?? null,
         }))
-        setDisplayPosition(nextPosition)
+
+        playback.reportDrift({
+          targetPosition: nextPosition,
+          actualPosition: playback.audioRef.current?.currentTime ?? null,
+          syncType: 'poll',
+          rttMs: null,
+        })
       } catch {
         // keep previous state on transient network errors
       }
     }
 
+    void pullState()
     const intervalId = window.setInterval(() => {
       void pullState()
     }, POLL_INTERVAL_MS)
@@ -255,17 +189,19 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
   return (
     <div className="w-full">
-      <audio ref={audioRef} preload="auto" className="hidden" />
       <ListenOnlyPlayerCard
         track={state.currentTrack}
-        currentPosition={displayPosition}
+        currentPosition={state.currentPosition ?? 0}
         isPaused={!!state.isPaused}
         isPlaying={!state.isPaused}
         listenerCount={state.listenerCount ?? 0}
         stationName={state.name}
         stationCode={state.code}
-        audioNeedsRestart={needsGesture}
-        onRestartAudio={restartAudio}
+        audioNeedsRestart={playback.audioNeedsRestart}
+        audioConnectionState={playback.audioConnectionState}
+        audioConnectionMessage={playback.audioConnectionMessage}
+        audioDiagnostics={playback.audioDiagnostics}
+        onRestartAudio={playback.restartAudio}
       />
     </div>
   )

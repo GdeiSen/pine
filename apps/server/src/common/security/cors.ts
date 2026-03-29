@@ -24,6 +24,12 @@ export const resolveAllowedOrigins = (
   const fallback = normalizeOrigin(fallbackClientOrigin ?? DEFAULT_CLIENT_ORIGIN)
   if (fallback) items.push(fallback)
 
+  // Keep local Docker/dev flows painless without requiring explicit ALLOWED_ORIGINS every time.
+  const localDevOrigins = ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://host.docker.internal:3000']
+  for (const origin of localDevOrigins) {
+    items.push(normalizeOrigin(origin))
+  }
+
   return Array.from(new Set(items))
 }
 
@@ -32,4 +38,3 @@ export const isAllowedOrigin = (origin: string | undefined, allowedOrigins: stri
   const normalized = normalizeOrigin(origin)
   return allowedOrigins.includes(normalized)
 }
-

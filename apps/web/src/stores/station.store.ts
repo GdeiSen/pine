@@ -2,6 +2,23 @@ import { create } from 'zustand'
 import type { QueueItem, ChatMessage, StationMember } from '@web-radio/shared'
 
 export type LoopMode = 'none' | 'track' | 'queue'
+export type AudioConnectionState =
+  | 'idle'
+  | 'connecting'
+  | 'buffering'
+  | 'reconnecting'
+  | 'playing'
+  | 'paused'
+  | 'blocked'
+
+export interface AudioDiagnostics {
+  driftMs: number | null
+  targetPosition: number | null
+  actualPosition: number | null
+  syncType: string | null
+  rttMs: number | null
+  updatedAt: number
+}
 
 interface CurrentTrack {
   id: string
@@ -45,8 +62,12 @@ interface PlaybackState {
 
 interface StationState {
   station: StationInfo | null
+  stationStreamUrl: string | null
   playback: PlaybackState
   audioNeedsRestart: boolean
+  audioConnectionState: AudioConnectionState
+  audioConnectionMessage: string | null
+  audioDiagnostics: AudioDiagnostics | null
   queue: QueueItem[]
   members: StationMember[]
   chat: ChatMessage[]
@@ -54,8 +75,14 @@ interface StationState {
   isConnecting: boolean
 
   setStation: (station: StationInfo) => void
+  setStationStreamUrl: (stationStreamUrl: string | null) => void
   setPlayback: (playback: Partial<PlaybackState>) => void
   setAudioNeedsRestart: (value: boolean) => void
+  setAudioConnection: (value: {
+    state: AudioConnectionState
+    message?: string | null
+    diagnostics?: AudioDiagnostics | null
+  }) => void
   setQueue: (queue: QueueItem[]) => void
   setMembers: (members: StationMember[]) => void
   addChatMessage: (message: ChatMessage) => void
@@ -78,8 +105,12 @@ const initialPlayback: PlaybackState = {
 
 export const useStationStore = create<StationState>((set) => ({
   station: null,
+  stationStreamUrl: null,
   playback: initialPlayback,
   audioNeedsRestart: false,
+  audioConnectionState: 'idle',
+  audioConnectionMessage: null,
+  audioDiagnostics: null,
   queue: [],
   members: [],
   chat: [],
@@ -87,8 +118,16 @@ export const useStationStore = create<StationState>((set) => ({
   isConnecting: false,
 
   setStation: (station) => set({ station }),
+  setStationStreamUrl: (stationStreamUrl) => set({ stationStreamUrl }),
   setPlayback: (playback) => set((s) => ({ playback: { ...s.playback, ...playback } })),
   setAudioNeedsRestart: (audioNeedsRestart) => set({ audioNeedsRestart }),
+  setAudioConnection: ({ state, message = null, diagnostics = null }) =>
+    set({
+      audioConnectionState: state,
+      audioConnectionMessage: message ?? null,
+      audioDiagnostics: diagnostics,
+      audioNeedsRestart: state === 'blocked',
+    }),
   setQueue: (queue) => set({ queue }),
   setMembers: (members) => set({ members }),
   addChatMessage: (message) =>
@@ -102,8 +141,12 @@ export const useStationStore = create<StationState>((set) => ({
   reset: () =>
     set({
       station: null,
+      stationStreamUrl: null,
       playback: initialPlayback,
       audioNeedsRestart: false,
+      audioConnectionState: 'idle',
+      audioConnectionMessage: null,
+      audioDiagnostics: null,
       queue: [],
       members: [],
       chat: [],

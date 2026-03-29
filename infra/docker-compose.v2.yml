@@ -1,0 +1,291 @@
+name: pine-v2
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pine}
+      POSTGRES_USER: ${POSTGRES_USER:-pine}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pine_dev_password_change_me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pine} -d ${POSTGRES_DB:-pine}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-pine}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-pine}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+    entrypoint: ["/bin/sh"]
+    command:
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD";
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_TRACKS";
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_COVERS";
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_TRANSCODES";
+        mc anonymous set private "local/$$MINIO_BUCKET_TRACKS" || true;
+        mc anonymous set private "local/$$MINIO_BUCKET_COVERS" || true;
+        mc anonymous set private "local/$$MINIO_BUCKET_TRANSCODES" || true;
+
+  icecast:
+    image: libretime/icecast:latest
+    restart: unless-stopped
+    environment:
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-change_me_source_password}
+      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:-change_me_admin_password}
+      ICECAST_RELAY_PASSWORD: ${ICECAST_RELAY_PASSWORD:-change_me_relay_password}
+      ICECAST_HOSTNAME: ${ICECAST_HOSTNAME:-localhost}
+      ICECAST_MOUNT: ${ICECAST_MOUNT:-/live.mp3}
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        sed \
+          -e "s|__ICECAST_SOURCE_PASSWORD__|${ICECAST_SOURCE_PASSWORD:-change_me_source_password}|g" \
+          -e "s|__ICECAST_ADMIN_PASSWORD__|${ICECAST_ADMIN_PASSWORD:-change_me_admin_password}|g" \
+          -e "s|__ICECAST_RELAY_PASSWORD__|${ICECAST_RELAY_PASSWORD:-change_me_relay_password}|g" \
+          -e "s|__ICECAST_HOSTNAME__|${ICECAST_HOSTNAME:-localhost}|g" \
+          -e "s|__ICECAST_MOUNT__|${ICECAST_MOUNT:-/live.mp3}|g" \
+          /etc/icecast/icecast.xml.tmpl > /tmp/icecast.xml
+        exec icecast -c /tmp/icecast.xml
+    ports:
+      - "${ICECAST_PORT:-8000}:8000"
+    volumes:
+      - ./icecast/icecast.xml:/etc/icecast/icecast.xml.tmpl:ro
+      - icecast_logs:/var/log/icecast
+
+  liquidsoap:
+    image: ghcr.io/savonet/liquidsoap:v2.3.3
+    user: "0:0"
+    restart: unless-stopped
+    depends_on:
+      - icecast
+    environment:
+      ICECAST_HOST: ${ICECAST_HOST:-icecast}
+      ICECAST_PORT: ${ICECAST_PORT_INTERNAL:-8000}
+      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-change_me_source_password}
+      ICECAST_MOUNT: ${ICECAST_MOUNT:-/live.mp3}
+      LIQUIDSOAP_SOURCE_NAME: ${LIQUIDSOAP_SOURCE_NAME:-PINE Radio}
+      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
+      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
+      LIQUIDSOAP_TELNET_PORT: ${LIQUIDSOAP_TELNET_PORT:-1234}
+    volumes:
+      - ./liquidsoap/radio.liq:/etc/liquidsoap/radio.liq.tmpl:ro
+      - liquidsoap_control:/var/lib/liquidsoap/control
+      - liquidsoap_cache:/var/lib/liquidsoap/cache
+    entrypoint: ["/bin/sh"]
+    command:
+      - -ec
+      - |
+        mkdir -p /var/lib/liquidsoap/control /var/lib/liquidsoap/cache;
+        touch /var/lib/liquidsoap/control/playlist.m3u;
+        sed \
+          -e "s|__LIQUIDSOAP_SOURCE_NAME__|${LIQUIDSOAP_SOURCE_NAME:-PINE Radio}|g" \
+          -e "s|__ICECAST_HOST__|${ICECAST_HOST:-icecast}|g" \
+          -e "s|__ICECAST_PORT__|${ICECAST_PORT_INTERNAL:-8000}|g" \
+          -e "s|__ICECAST_SOURCE_PASSWORD__|${ICECAST_SOURCE_PASSWORD:-change_me_source_password}|g" \
+          -e "s|__ICECAST_MOUNT__|${ICECAST_MOUNT:-/live.mp3}|g" \
+          -e "s|__LIQUIDSOAP_TELNET_PORT__|${LIQUIDSOAP_TELNET_PORT:-1234}|g" \
+          /etc/liquidsoap/radio.liq.tmpl > /tmp/radio.liq;
+        exec liquidsoap /tmp/radio.liq;
+
+  api:
+    image: pine-api:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+      target: runtime
+    command: ["/bin/sh", "-ec", "pnpm exec prisma migrate deploy && pnpm start"]
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_please_change_32_chars_minimum_123456}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_jwt_refresh_secret_please_change_32_chars_abcdef}
+      JWT_ACCESS_EXPIRES: ${JWT_ACCESS_EXPIRES:-15m}
+      JWT_REFRESH_EXPIRES: ${JWT_REFRESH_EXPIRES:-7d}
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      STORAGE_PATH: /data/storage
+      PUBLIC_STREAM_URL_TEMPLATE: ${PUBLIC_STREAM_URL_TEMPLATE:-http://localhost:8000/live.mp3}
+      ICECAST_PUBLIC_URL: ${ICECAST_PUBLIC_URL:-http://localhost:8000/live.mp3}
+      PLAYBACK_OUTBOX_POLL_INTERVAL_MS: ${PLAYBACK_OUTBOX_POLL_INTERVAL_MS:-400}
+      PLAYBACK_OUTBOX_BATCH_SIZE: ${PLAYBACK_OUTBOX_BATCH_SIZE:-100}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
+      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
+      LIQUIDSOAP_TELNET_HOST: ${LIQUIDSOAP_TELNET_HOST:-liquidsoap}
+      LIQUIDSOAP_TELNET_PORT: ${LIQUIDSOAP_TELNET_PORT:-1234}
+    ports:
+      - "${API_PORT:-3001}:3001"
+    volumes:
+      - api_storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      icecast:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/health/ready >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker-playout:
+    image: pine-api:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+      target: runtime
+    command: ["pnpm", "start:worker-playout"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
+      STORAGE_PATH: /data/storage
+      PLAYOUT_POLL_INTERVAL_MS: ${PLAYOUT_POLL_INTERVAL_MS:-500}
+      PLAYOUT_HEARTBEAT_INTERVAL_MS: ${PLAYOUT_HEARTBEAT_INTERVAL_MS:-30000}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
+      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
+      LIQUIDSOAP_TELNET_HOST: ${LIQUIDSOAP_TELNET_HOST:-liquidsoap}
+      LIQUIDSOAP_TELNET_PORT: ${LIQUIDSOAP_TELNET_PORT:-1234}
+    volumes:
+      - api_storage:/data/storage
+      - liquidsoap_control:/var/lib/liquidsoap/control
+      - liquidsoap_cache:/var/lib/liquidsoap/cache
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  worker-transcode:
+    image: pine-api:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+      target: runtime
+    command: ["pnpm", "start:worker-transcode"]
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
+      STORAGE_PATH: /data/storage
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
+      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
+    volumes:
+      - api_storage:/data/storage
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: pine-web:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      target: runtime
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-http://localhost}
+      NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-PINE}
+      NEXT_PUBLIC_STREAM_URL: ${NEXT_PUBLIC_STREAM_URL:-http://localhost:8000/live.mp3}
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      icecast:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/nginx-health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres_data:
+  minio_data:
+  icecast_logs:
+  liquidsoap_control:
+  liquidsoap_cache:
+  api_storage:
+  nginx_logs:

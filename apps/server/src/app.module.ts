@@ -13,6 +13,9 @@ import { MembersModule } from './modules/members/members.module'
 import { ChatModule } from './modules/chat/chat.module'
 import { InvitesModule } from './modules/invites/invites.module'
 import { GatewayModule } from './modules/gateway/gateway.module'
+import { PlaybackModule } from './modules/playback/playback.module'
+import { StorageModule } from './modules/storage/storage.module'
+import { HealthModule } from './modules/health/health.module'
 
 @Module({
   imports: [
@@ -29,6 +32,9 @@ import { GatewayModule } from './modules/gateway/gateway.module'
     ChatModule,
     InvitesModule,
     GatewayModule,
+    PlaybackModule,
+    StorageModule,
+    HealthModule,
   ],
   providers: [
     {

@@ -58,6 +58,14 @@ export class QueueController {
     return this.queueService.getQueue(stationId, user.id)
   }
 
+  @Get('snapshot')
+  getQueueSnapshot(
+    @Param('stationId', new ParseUUIDPipe()) stationId: string,
+    @CurrentUser() user: { id: string },
+  ) {
+    return this.queueService.getQueue(stationId, user.id)
+  }
+
   @Post()
   addToQueue(
     @Param('stationId', new ParseUUIDPipe()) stationId: string,

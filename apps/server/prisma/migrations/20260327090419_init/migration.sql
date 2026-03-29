@@ -5,9 +5,9 @@ CREATE TABLE "users" (
     "username" TEXT NOT NULL,
     "passwordHash" TEXT NOT NULL,
     "avatar" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    "lastSeenAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- CreateTable
@@ -15,8 +15,8 @@ CREATE TABLE "refresh_tokens" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "token" TEXT NOT NULL,
     "userId" TEXT NOT NULL,
-    "expiresAt" DATETIME NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "refresh_tokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -28,19 +28,19 @@ CREATE TABLE "stations" (
     "description" TEXT,
     "coverImage" TEXT,
     "ownerId" TEXT NOT NULL,
-    "accessMode" TEXT NOT NULL DEFAULT 'CODE_ONLY',
+    "accessMode" TEXT NOT NULL DEFAULT 'PRIVATE',
     "passwordHash" TEXT,
     "isLive" BOOLEAN NOT NULL DEFAULT false,
     "currentTrackId" TEXT,
-    "currentPosition" REAL NOT NULL DEFAULT 0,
-    "trackStartedAt" DATETIME,
+    "currentPosition" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "trackStartedAt" TIMESTAMP(3),
     "isPaused" BOOLEAN NOT NULL DEFAULT false,
-    "pausedPosition" REAL NOT NULL DEFAULT 0,
+    "pausedPosition" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "activePlaylistId" TEXT,
     "systemQueueMode" TEXT NOT NULL DEFAULT 'SEQUENTIAL',
     "crossfadeDuration" INTEGER NOT NULL DEFAULT 0,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "stations_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -52,8 +52,8 @@ CREATE TABLE "playlists" (
     "isDefault" BOOLEAN NOT NULL DEFAULT false,
     "sortOrder" INTEGER NOT NULL DEFAULT 0,
     "coverImage" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "playlists_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -73,7 +73,7 @@ CREATE TABLE "tracks" (
     "album" TEXT,
     "year" INTEGER,
     "genre" TEXT,
-    "duration" REAL NOT NULL DEFAULT 0,
+    "duration" DOUBLE PRECISION NOT NULL DEFAULT 0,
     "fileSize" INTEGER NOT NULL DEFAULT 0,
     "bitrate" INTEGER,
     "sampleRate" INTEGER,
@@ -81,8 +81,8 @@ CREATE TABLE "tracks" (
     "status" TEXT NOT NULL DEFAULT 'PROCESSING',
     "waveformData" TEXT,
     "playCount" INTEGER NOT NULL DEFAULT 0,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "tracks_uploadedById_fkey" FOREIGN KEY ("uploadedById") REFERENCES "users" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
 
@@ -93,9 +93,10 @@ CREATE TABLE "playlist_tracks" (
     "trackId" TEXT NOT NULL,
     "sortOrder" INTEGER NOT NULL DEFAULT 0,
     "addedById" TEXT,
-    "addedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "addedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "playlist_tracks_playlistId_fkey" FOREIGN KEY ("playlistId") REFERENCES "playlists" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
-    CONSTRAINT "playlist_tracks_trackId_fkey" FOREIGN KEY ("trackId") REFERENCES "tracks" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT "playlist_tracks_trackId_fkey" FOREIGN KEY ("trackId") REFERENCES "tracks" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "playlist_tracks_addedById_fkey" FOREIGN KEY ("addedById") REFERENCES "users" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -107,8 +108,8 @@ CREATE TABLE "queue_items" (
     "queueType" TEXT NOT NULL DEFAULT 'USER',
     "position" INTEGER NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'PENDING',
-    "playedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "playedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "queue_items_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "queue_items_trackId_fkey" FOREIGN KEY ("trackId") REFERENCES "tracks" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "queue_items_addedById_fkey" FOREIGN KEY ("addedById") REFERENCES "users" ("id") ON DELETE SET NULL ON UPDATE CASCADE
@@ -121,8 +122,8 @@ CREATE TABLE "station_members" (
     "userId" TEXT NOT NULL,
     "role" TEXT NOT NULL DEFAULT 'GUEST',
     "permissions" TEXT NOT NULL DEFAULT '[]',
-    "joinedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "joinedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "station_members_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "station_members_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -135,7 +136,7 @@ CREATE TABLE "chat_messages" (
     "content" TEXT NOT NULL,
     "type" TEXT NOT NULL DEFAULT 'TEXT',
     "metadata" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "chat_messages_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "chat_messages_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
@@ -148,9 +149,10 @@ CREATE TABLE "station_invites" (
     "createdById" TEXT NOT NULL,
     "maxUses" INTEGER,
     "usedCount" INTEGER NOT NULL DEFAULT 0,
-    "expiresAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "station_invites_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    "expiresAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "station_invites_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "station_invites_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -159,8 +161,8 @@ CREATE TABLE "listen_sessions" (
     "stationId" TEXT NOT NULL,
     "userId" TEXT,
     "fingerprint" TEXT,
-    "connectedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "disconnectedAt" DATETIME,
+    "connectedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "disconnectedAt" TIMESTAMP(3),
     "totalListenTime" INTEGER NOT NULL DEFAULT 0,
     CONSTRAINT "listen_sessions_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "listen_sessions_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE SET NULL ON UPDATE CASCADE
@@ -173,7 +175,7 @@ CREATE TABLE "activity_logs" (
     "userId" TEXT,
     "action" TEXT NOT NULL,
     "metadata" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "activity_logs_stationId_fkey" FOREIGN KEY ("stationId") REFERENCES "stations" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 

@@ -7,27 +7,25 @@ import {
   BadRequestException,
 } from '@nestjs/common'
 import * as bcrypt from 'bcryptjs'
-import * as fs from 'fs'
 import * as path from 'path'
 import { ConfigService } from '@nestjs/config'
+import { PlaybackLoopMode, TrackAssetKind } from '@prisma/client'
 import { PrismaService } from '../../prisma/prisma.service'
 import { CreateStationDto } from './dto/create-station.dto'
 import { UpdateStationDto } from './dto/update-station.dto'
-import { StationAccessMode, MemberRole, ROLE_PERMISSIONS } from '@web-radio/shared'
+import { StorageService } from '../storage/storage.service'
+import { StorageScope } from '../storage/storage.config'
+import { StationAccessMode, MemberRole, ROLE_PERMISSIONS, StreamQuality } from '@web-radio/shared'
 
 @Injectable()
 export class StationsService {
-  private storagePath: string
   private static readonly MAX_STATIONS_PER_USER = 5
 
   constructor(
     private prisma: PrismaService,
     private configService: ConfigService,
-  ) {
-    this.storagePath = path.resolve(
-      this.configService.get<string>('STORAGE_PATH', './storage'),
-    )
-  }
+    private storageService: StorageService,
+  ) {}
 
   async create(userId: string, dto: CreateStationDto) {
     const ownedStationsCount = await this.prisma.station.count({
@@ -43,7 +41,6 @@ export class StationsService {
     const accessMode = this.normalizeAccessMode(dto.accessMode)
 
     let passwordEnabled = dto.passwordEnabled ?? false
-    if (dto.accessMode === StationAccessMode.CODE_PASSWORD) passwordEnabled = true
     if (dto.password) passwordEnabled = true
     if (passwordEnabled && !dto.password) {
       throw new BadRequestException('Password is required when protection is enabled')
@@ -88,11 +85,25 @@ export class StationsService {
         },
       })
 
+      await tx.playbackState.create({
+        data: {
+          stationId: s.id,
+          currentTrackId: null,
+          currentQueueItemId: null,
+          currentQueueType: null,
+          currentPosition: 0,
+          currentTrackDuration: 0,
+          trackStartedAt: null,
+          isPaused: true,
+          pausedPosition: 0,
+          loopMode: PlaybackLoopMode.NONE,
+          shuffleEnabled: false,
+          lastSyncedAt: new Date(),
+        },
+      })
+
       return s
     })
-
-    // Create storage directory
-    this.createStationDirectory(station.id)
 
     return this.formatStation(station, 0)
   }
@@ -108,10 +119,12 @@ export class StationsService {
 
     if (!station) throw new NotFoundException('Station not found')
 
+    const playback = await this.ensurePlaybackState(station.id, station.systemQueueMode)
+
     let currentTrack: any = null
-    if (station.currentTrackId) {
+    if (playback.currentTrackId) {
       currentTrack = await this.prisma.track.findUnique({
-        where: { id: station.currentTrackId },
+        where: { id: playback.currentTrackId },
         include: {
           uploadedBy: { select: { id: true, username: true, avatar: true } },
         },
@@ -122,7 +135,7 @@ export class StationsService {
     const accessMode = this.normalizeAccessMode(station.accessMode)
     const serverTime = new Date()
     if (accessMode === StationAccessMode.PUBLIC) {
-      return this.formatStation(station, station._count.members, currentTrack, serverTime)
+      return this.formatStation(station, station._count.members, currentTrack, serverTime, playback)
     }
 
     // Private station metadata requires authentication.
@@ -130,7 +143,56 @@ export class StationsService {
       throw new ForbiddenException('Authentication required for non-public station')
     }
 
-    return this.formatStation(station, station._count.members, currentTrack, serverTime)
+    return this.formatStation(station, station._count.members, currentTrack, serverTime, playback)
+  }
+
+  async getStreamInfo(code: string, userId?: string) {
+    const station = await this.prisma.station.findUnique({
+      where: { code },
+      select: {
+        id: true,
+        code: true,
+        ownerId: true,
+        accessMode: true,
+        systemQueueMode: true,
+        streamQuality: true,
+      },
+    })
+
+    if (!station) throw new NotFoundException('Station not found')
+
+    const accessMode = this.normalizeAccessMode(station.accessMode)
+    if (accessMode !== StationAccessMode.PUBLIC) {
+      if (!userId) {
+        throw new ForbiddenException('Authentication required for non-public station')
+      }
+
+      const isOwner = station.ownerId === userId
+      if (!isOwner) {
+        const member = await this.prisma.stationMember.findUnique({
+          where: { stationId_userId: { stationId: station.id, userId } },
+          select: { id: true },
+        })
+
+        if (!member) {
+          throw new ForbiddenException('Access denied')
+        }
+      }
+    }
+
+    const { mountPath, streamUrl } = this.buildStreamEndpoints(station.code)
+    const playback = await this.ensurePlaybackState(station.id, station.systemQueueMode)
+
+    return {
+      stationId: station.id,
+      code: station.code,
+      streamUrl,
+      mountPath,
+      serverTime: new Date().toISOString(),
+      qualityHint: station.streamQuality,
+      latencyHintMs: this.estimateLatencyHintMs(station.streamQuality),
+      currentTrackId: playback.currentTrackId,
+    }
   }
 
   async join(code: string, userId: string, password?: string) {
@@ -172,7 +234,16 @@ export class StationsService {
       orderBy: { createdAt: 'desc' },
     })
 
-    return stations.map((s) => this.formatStation(s, s._count.members))
+    const playbackByStationId = await this.getPlaybackStateByStationId(stations)
+    return stations.map((station) =>
+      this.formatStation(
+        station,
+        station._count.members,
+        null,
+        undefined,
+        playbackByStationId.get(station.id),
+      ),
+    )
   }
 
   async update(stationId: string, userId: string, dto: UpdateStationDto) {
@@ -226,22 +297,16 @@ export class StationsService {
         mediumPath: true,
         lowPath: true,
         coverPath: true,
+        assets: {
+          select: {
+            kind: true,
+            objectKey: true,
+          },
+        },
       },
     })
 
-    for (const track of tracks) {
-      const files = [
-        track.originalPath,
-        track.highPath,
-        track.mediumPath,
-        track.lowPath,
-        track.coverPath,
-      ].filter((value): value is string => Boolean(value))
-
-      for (const filePath of files) {
-        this.safeDeleteStorageFile(filePath)
-      }
-    }
+    await Promise.all(tracks.map((track) => this.deleteTrackObjects(track)))
 
     const trackIds = tracks.map((t) => t.id)
     await this.prisma.$transaction(async (tx) => {
@@ -252,8 +317,6 @@ export class StationsService {
       await tx.track.deleteMany({ where: { stationId } })
       await tx.station.delete({ where: { id: stationId } })
     })
-
-    this.removeStationDirectory(stationId)
   }
 
   async setLive(stationId: string, isLive: boolean) {
@@ -274,7 +337,16 @@ export class StationsService {
       take: 50,
     })
 
-    return stations.map((s) => this.formatStation(s, s._count.members))
+    const playbackByStationId = await this.getPlaybackStateByStationId(stations)
+    return stations.map((station) =>
+      this.formatStation(
+        station,
+        station._count.members,
+        null,
+        undefined,
+        playbackByStationId.get(station.id),
+      ),
+    )
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -291,35 +363,6 @@ export class StationsService {
     throw new ConflictException('Could not generate unique code')
   }
 
-  private createStationDirectory(stationId: string) {
-    const dir = path.join(this.storagePath, 'stations', stationId)
-    fs.mkdirSync(dir, { recursive: true })
-  }
-
-  private removeStationDirectory(stationId: string) {
-    const dir = path.join(this.storagePath, 'stations', stationId)
-    if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true, force: true })
-    }
-  }
-
-  private safeDeleteStorageFile(rawPath: string) {
-    try {
-      const resolved = path.resolve(rawPath)
-      if (
-        resolved !== this.storagePath &&
-        !resolved.startsWith(`${this.storagePath}${path.sep}`)
-      ) {
-        return
-      }
-      if (fs.existsSync(resolved)) {
-        fs.unlinkSync(resolved)
-      }
-    } catch {
-      // best effort cleanup
-    }
-  }
-
   private async assertOwner(stationId: string, userId: string) {
     const station = await this.prisma.station.findUnique({ where: { id: stationId } })
     if (!station) throw new NotFoundException('Station not found')
@@ -332,7 +375,22 @@ export class StationsService {
     listenerCount: number,
     currentTrack?: any | null,
     serverTime?: Date,
+    playback?: {
+      currentTrackId: string | null
+      currentPosition: number
+      isPaused: boolean
+      trackStartedAt: Date | null
+      pausedPosition: number
+    } | null,
   ) {
+    const playbackState = playback ?? {
+      currentTrackId: null,
+      currentPosition: 0,
+      isPaused: true,
+      trackStartedAt: null,
+      pausedPosition: 0,
+    }
+
     const accessMode = this.normalizeAccessMode(station.accessMode)
     return {
       id: station.id,
@@ -345,7 +403,7 @@ export class StationsService {
       accessMode,
       isPasswordProtected: !!station.passwordHash,
       isLive: station.isLive,
-      currentTrackId: station.currentTrackId,
+      currentTrackId: playbackState.currentTrackId,
       currentTrack: currentTrack
         ? {
             id: currentTrack.id,
@@ -360,10 +418,10 @@ export class StationsService {
             uploadedBy: currentTrack.uploadedBy,
           }
         : null,
-      currentPosition: station.currentPosition,
-      isPaused: station.isPaused,
-      trackStartedAt: station.trackStartedAt,
-      pausedPosition: station.pausedPosition,
+      currentPosition: playbackState.currentPosition,
+      isPaused: playbackState.isPaused,
+      trackStartedAt: playbackState.trackStartedAt,
+      pausedPosition: playbackState.pausedPosition,
       crossfadeDuration: station.crossfadeDuration,
       streamQuality: station.streamQuality,
       activePlaylistId: station.activePlaylistId,
@@ -373,8 +431,189 @@ export class StationsService {
     }
   }
 
+  private async getPlaybackStateByStationId(
+    stations: Array<{ id: string; systemQueueMode: string }>,
+  ) {
+    const playbackByStationId = new Map<
+      string,
+      {
+        currentTrackId: string | null
+        currentPosition: number
+        isPaused: boolean
+        trackStartedAt: Date | null
+        pausedPosition: number
+      }
+    >()
+
+    await Promise.all(
+      stations.map(async (station) => {
+        const playback = await this.ensurePlaybackState(station.id, station.systemQueueMode)
+        playbackByStationId.set(station.id, playback)
+      }),
+    )
+
+    return playbackByStationId
+  }
+
+  private scopeByAssetKind(kind: TrackAssetKind): StorageScope | null {
+    switch (kind) {
+      case TrackAssetKind.ORIGINAL:
+        return 'tracks'
+      case TrackAssetKind.COVER_WEBP:
+        return 'covers'
+      case TrackAssetKind.TRANSCODE_LOW:
+      case TrackAssetKind.TRANSCODE_MEDIUM:
+      case TrackAssetKind.TRANSCODE_HIGH:
+      case TrackAssetKind.WAVEFORM_JSON:
+        return 'transcodes'
+      default:
+        return null
+    }
+  }
+
+  private async deleteTrackObjects(track: {
+    originalPath: string
+    highPath: string | null
+    mediumPath: string | null
+    lowPath: string | null
+    coverPath: string | null
+    assets: Array<{ kind: TrackAssetKind; objectKey: string }>
+  }) {
+    const deletions: Array<{ scope: StorageScope; key: string }> = []
+
+    for (const asset of track.assets) {
+      const scope = this.scopeByAssetKind(asset.kind)
+      if (!scope) continue
+      deletions.push({ scope, key: asset.objectKey })
+    }
+
+    if (track.originalPath) deletions.push({ scope: 'tracks', key: track.originalPath })
+    if (track.highPath) deletions.push({ scope: 'transcodes', key: track.highPath })
+    if (track.mediumPath) deletions.push({ scope: 'transcodes', key: track.mediumPath })
+    if (track.lowPath) deletions.push({ scope: 'transcodes', key: track.lowPath })
+    if (track.coverPath) deletions.push({ scope: 'covers', key: track.coverPath })
+
+    await Promise.all(
+      deletions.map((entry) =>
+        this.storageService.deleteObject(entry.scope, entry.key).catch(() => undefined),
+      ),
+    )
+  }
+
+  private async ensurePlaybackState(stationId: string, systemQueueMode: string) {
+    return this.prisma.playbackState.upsert({
+      where: { stationId },
+      create: {
+        stationId,
+        currentTrackId: null,
+        currentQueueItemId: null,
+        currentQueueType: null,
+        currentPosition: 0,
+        currentTrackDuration: 0,
+        trackStartedAt: null,
+        isPaused: true,
+        pausedPosition: 0,
+        loopMode: PlaybackLoopMode.NONE,
+        shuffleEnabled: systemQueueMode !== 'SEQUENTIAL',
+        lastSyncedAt: new Date(),
+      },
+      update: {
+        shuffleEnabled: systemQueueMode !== 'SEQUENTIAL',
+      },
+    })
+  }
+
   private normalizeAccessMode(accessMode?: string | null): StationAccessMode {
     if (accessMode === StationAccessMode.PUBLIC) return StationAccessMode.PUBLIC
-    return StationAccessMode.PRIVATE
+    if (accessMode === StationAccessMode.PRIVATE || accessMode == null) {
+      return StationAccessMode.PRIVATE
+    }
+    throw new BadRequestException(`Unsupported access mode: ${accessMode}`)
+  }
+
+  private buildStreamEndpoints(code: string) {
+    const explicitUrl =
+      this.configService.get<string>('ICECAST_PUBLIC_URL')?.trim() ??
+      this.configService.get<string>('PUBLIC_STREAM_URL_TEMPLATE')?.trim()
+
+    if (explicitUrl) {
+      const replaced = explicitUrl.replaceAll('{code}', code)
+      const isAbsolute = /^https?:\/\//i.test(replaced)
+      const normalizedRelative = replaced.startsWith('/') ? replaced : `/${replaced}`
+
+      if (!isAbsolute) {
+        return {
+          mountPath: normalizedRelative,
+          streamUrl: normalizedRelative,
+        }
+      }
+
+      try {
+        const parsed = new URL(replaced)
+        const clientHost = new URL(this.getClientOrigin()).hostname
+        const explicitHostIsLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+        const clientHostIsLocal = clientHost === 'localhost' || clientHost === '127.0.0.1'
+        if (explicitHostIsLocal && !clientHostIsLocal) {
+          throw new Error('ignore localhost explicit stream url outside local client host')
+        }
+        return {
+          mountPath: parsed.pathname,
+          streamUrl: replaced,
+        }
+      } catch {
+        // fall through to derived mount below
+      }
+    }
+
+    const icecastMount = this.configService.get<string>('ICECAST_MOUNT')?.trim() ?? '/live.mp3'
+    const mountPath = icecastMount.startsWith('/') ? icecastMount : `/${icecastMount}`
+
+    // In a reverse-proxy setup (web + api on one domain), a relative stream path
+    // is the most resilient default and avoids localhost/public-host mismatches.
+    if (!this.configService.get<string>('ICECAST_HOSTNAME')?.trim()) {
+      return {
+        mountPath,
+        streamUrl: mountPath,
+      }
+    }
+
+    const rawHost =
+      this.configService.get<string>('ICECAST_HOSTNAME')?.trim() ??
+      new URL(this.getClientOrigin()).hostname
+    const protocol = this.configService.get<string>('ICECAST_USE_SSL')?.trim() === 'true'
+      ? 'https'
+      : 'http'
+    const configuredPort = Number.parseInt(this.configService.get<string>('ICECAST_PORT') ?? '8000', 10)
+    const hasPort = /:\d+$/.test(rawHost)
+    const isDefaultPort = (protocol === 'http' && configuredPort === 80) || (protocol === 'https' && configuredPort === 443)
+    const hostWithPort = hasPort || !Number.isFinite(configuredPort) || isDefaultPort
+      ? rawHost
+      : `${rawHost}:${configuredPort}`
+
+    return {
+      mountPath,
+      streamUrl: `${protocol}://${hostWithPort}${mountPath}`,
+    }
+  }
+
+  private getClientOrigin() {
+    const clientUrl = this.configService.get<string>('CLIENT_URL', 'http://localhost:3000')
+    try {
+      return new URL(clientUrl).origin
+    } catch {
+      return clientUrl.replace(/\/+$/, '')
+    }
+  }
+
+  private estimateLatencyHintMs(quality: string) {
+    switch (quality) {
+      case StreamQuality.LOW:
+        return 2800
+      case StreamQuality.MEDIUM:
+        return 2200
+      case StreamQuality.HIGH:
+      default:
+        return 1800
+    }
   }
 }

@@ -1,0 +1,135 @@
+pine_playback_state_heartbeat:
+  query: |
+    SELECT
+      station_id,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - COALESCE(last_synced_at, NOW()))), 0) AS age_seconds
+    FROM playback_states;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - age_seconds:
+        usage: GAUGE
+        description: Seconds since the playback state was last synchronized
+
+pine_playback_commands_pending:
+  query: |
+    SELECT
+      station_id,
+      COUNT(*)::float8 AS total
+    FROM playback_commands
+    WHERE status = 'PENDING'
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - total:
+        usage: GAUGE
+        description: Pending playback commands
+
+pine_playback_commands_processing:
+  query: |
+    SELECT
+      station_id,
+      COUNT(*)::float8 AS total
+    FROM playback_commands
+    WHERE status = 'PROCESSING'
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - total:
+        usage: GAUGE
+        description: Processing playback commands
+
+pine_playback_commands_oldest_pending:
+  query: |
+    SELECT
+      station_id,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at))), 0) AS oldest_pending_age_seconds
+    FROM playback_commands
+    WHERE status = 'PENDING'
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - age_seconds:
+        usage: GAUGE
+        description: Age of the oldest pending playback command in seconds
+
+pine_playback_commands_oldest_processing:
+  query: |
+    SELECT
+      station_id,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(updated_at))), 0) AS oldest_processing_age_seconds
+    FROM playback_commands
+    WHERE status = 'PROCESSING'
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - age_seconds:
+        usage: GAUGE
+        description: Age of the oldest processing playback command in seconds
+
+pine_playback_events_unprocessed:
+  query: |
+    SELECT
+      station_id,
+      COUNT(*)::float8 AS total
+    FROM playback_events
+    WHERE processed_at IS NULL
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - total:
+        usage: GAUGE
+        description: Unprocessed playback events
+
+pine_playback_events_oldest_unprocessed:
+  query: |
+    SELECT
+      station_id,
+      COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at))), 0) AS oldest_unprocessed_age_seconds
+    FROM playback_events
+    WHERE processed_at IS NULL
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - age_seconds:
+        usage: GAUGE
+        description: Age of the oldest unprocessed playback event in seconds
+
+pine_queue_pending:
+  query: |
+    SELECT
+      station_id,
+      COUNT(*)::float8 AS total
+    FROM queue_items
+    WHERE status = 'PENDING'
+    GROUP BY station_id;
+  metrics:
+    - station_id:
+        usage: LABEL
+        description: Station ID
+    - total:
+        usage: GAUGE
+        description: Pending queue items
+
+pine_station_live:
+  query: |
+    SELECT
+      COALESCE(SUM(CASE WHEN is_live THEN 1 ELSE 0 END), 0)::float8 AS total
+    FROM stations;
+  metrics:
+    - total:
+        usage: GAUGE
+        description: Count of live stations

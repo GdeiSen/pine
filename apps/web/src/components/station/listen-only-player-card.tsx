@@ -21,6 +21,16 @@ interface ListenOnlyPlayerCardProps {
   stationName: string
   stationCode: string
   audioNeedsRestart: boolean
+  audioConnectionState: 'idle' | 'connecting' | 'buffering' | 'reconnecting' | 'playing' | 'paused' | 'blocked'
+  audioConnectionMessage: string | null
+  audioDiagnostics: {
+    driftMs: number | null
+    targetPosition: number | null
+    actualPosition: number | null
+    syncType: string | null
+    rttMs: number | null
+    updatedAt: number
+  } | null
   onRestartAudio: () => void
 }
 
@@ -33,6 +43,9 @@ export function ListenOnlyPlayerCard({
   stationName,
   stationCode,
   audioNeedsRestart,
+  audioConnectionState,
+  audioConnectionMessage,
+  audioDiagnostics,
   onRestartAudio,
 }: ListenOnlyPlayerCardProps) {
   return (
@@ -55,6 +68,9 @@ export function ListenOnlyPlayerCard({
           stationCode={stationCode}
           canControl={false}
           audioNeedsRestart={audioNeedsRestart}
+          audioConnectionState={audioConnectionState}
+          audioConnectionMessage={audioConnectionMessage}
+          audioDiagnostics={audioDiagnostics}
           loopMode="none"
           shuffleEnabled={false}
           onPlayPause={() => {}}

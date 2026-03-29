@@ -1,0 +1,1 @@
+ALTER TYPE "playback_command_type" ADD VALUE IF NOT EXISTS 'PREVIOUS';

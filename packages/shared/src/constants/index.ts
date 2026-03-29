@@ -31,29 +31,20 @@ export const QUALITY_BITRATES = {
 export const CHAT_PAGE_SIZE = 50
 export const HISTORY_MAX_SIZE = 50
 
-export const WS_EVENTS = {
+export const WS_EVENTS_V2 = {
   // Server → Client
-  STATION_STATE: 'station:state',
-  TRACK_CHANGED: 'track:changed',
-  TRACK_ENDED: 'track:ended',
-  QUEUE_UPDATED: 'queue:updated',
-  PLAYBACK_SYNC: 'playback:sync',
-  LISTENER_JOINED: 'listener:joined',
-  LISTENER_LEFT: 'listener:left',
-  MEMBER_UPDATED: 'member:updated',
-  CHAT_MESSAGE: 'chat:message',
-  STATION_SETTINGS: 'station:settings',
-  ERROR: 'error',
+  STATION_STATE: 'station:state:v2',
+  TRACK_CHANGED: 'track:changed:v2',
+  QUEUE_UPDATED: 'queue:updated:v2',
+  PLAYBACK_SYNC: 'playback:sync:v2',
+  LISTENER_JOINED: 'listener:joined:v2',
+  LISTENER_LEFT: 'listener:left:v2',
+  CHAT_MESSAGE: 'chat:message:v2',
 
   // Client → Server
-  STATION_JOIN: 'station:join',
-  STATION_LEAVE: 'station:leave',
-  PLAYBACK_CONTROL: 'playback:control',
-  TIME_SYNC: 'time:sync',
-  QUEUE_ADD: 'queue:add',
-  QUEUE_REORDER: 'queue:reorder',
-  QUEUE_REMOVE: 'queue:remove',
-  QUEUE_SKIP: 'queue:skip',
-  CHAT_SEND: 'chat:send',
-  HEARTBEAT: 'station:heartbeat',
+  STATION_JOIN: 'station:join:v2',
+  STATION_LEAVE: 'station:leave:v2',
+  TIME_SYNC: 'time:sync:v2',
+  CHAT_SEND: 'chat:send:v2',
+  HEARTBEAT: 'station:heartbeat:v2',
 } as const

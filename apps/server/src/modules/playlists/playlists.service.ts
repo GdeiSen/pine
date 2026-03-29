@@ -1,9 +1,10 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common'
+import { TrackAssetKind } from '@prisma/client'
 import { PrismaService } from '../../prisma/prisma.service'
 import { QueueService } from '../queue/queue.service'
+import { StorageService } from '../storage/storage.service'
+import { StorageScope } from '../storage/storage.config'
 import { IsString, MinLength, MaxLength } from 'class-validator'
-import * as fs from 'fs'
-import * as path from 'path'
 
 export class CreatePlaylistDto {
   @IsString()
@@ -17,6 +18,7 @@ export class PlaylistsService {
   constructor(
     private prisma: PrismaService,
     private queueService: QueueService,
+    private storageService: StorageService,
   ) {}
 
   async getStationPlaylists(stationId: string, userId: string) {
@@ -86,7 +88,7 @@ export class PlaylistsService {
     const orphanTracks = await this.prisma.track.findMany({
       where: {
         id: { in: trackIds },
-        playlists: { none: {} },
+        playlistLinks: { none: {} },
       },
       select: {
         id: true,
@@ -95,22 +97,16 @@ export class PlaylistsService {
         mediumPath: true,
         lowPath: true,
         coverPath: true,
+        assets: {
+          select: {
+            kind: true,
+            objectKey: true,
+          },
+        },
       },
     })
 
-    for (const track of orphanTracks) {
-      const files = [
-        track.originalPath,
-        track.highPath,
-        track.mediumPath,
-        track.lowPath,
-        track.coverPath,
-      ].filter((value): value is string => Boolean(value))
-
-      for (const filePath of files) {
-        this.safeDeleteStorageFile(filePath)
-      }
-    }
+    await Promise.all(orphanTracks.map((track) => this.deleteTrackObjects(track)))
 
     if (orphanTracks.length) {
       await this.prisma.track.deleteMany({
@@ -179,14 +175,48 @@ export class PlaylistsService {
     if (!member) throw new ForbiddenException('Access denied')
   }
 
-  private safeDeleteStorageFile(rawPath: string) {
-    try {
-      const storageRoot = path.resolve(process.env.STORAGE_PATH ?? './storage')
-      const resolved = path.resolve(rawPath)
-      if (!resolved.startsWith(`${storageRoot}${path.sep}`)) return
-      if (fs.existsSync(resolved)) fs.unlinkSync(resolved)
-    } catch {
-      // no-op: deleting stale files should not fail playlist removal
+  private scopeByAssetKind(kind: TrackAssetKind): StorageScope | null {
+    switch (kind) {
+      case TrackAssetKind.ORIGINAL:
+        return 'tracks'
+      case TrackAssetKind.COVER_WEBP:
+        return 'covers'
+      case TrackAssetKind.TRANSCODE_LOW:
+      case TrackAssetKind.TRANSCODE_MEDIUM:
+      case TrackAssetKind.TRANSCODE_HIGH:
+      case TrackAssetKind.WAVEFORM_JSON:
+        return 'transcodes'
+      default:
+        return null
     }
+  }
+
+  private async deleteTrackObjects(track: {
+    originalPath: string
+    highPath: string | null
+    mediumPath: string | null
+    lowPath: string | null
+    coverPath: string | null
+    assets: Array<{ kind: TrackAssetKind; objectKey: string }>
+  }) {
+    const deletions: Array<{ scope: StorageScope; key: string }> = []
+
+    for (const asset of track.assets) {
+      const scope = this.scopeByAssetKind(asset.kind)
+      if (!scope) continue
+      deletions.push({ scope, key: asset.objectKey })
+    }
+
+    if (track.originalPath) deletions.push({ scope: 'tracks', key: track.originalPath })
+    if (track.highPath) deletions.push({ scope: 'transcodes', key: track.highPath })
+    if (track.mediumPath) deletions.push({ scope: 'transcodes', key: track.mediumPath })
+    if (track.lowPath) deletions.push({ scope: 'transcodes', key: track.lowPath })
+    if (track.coverPath) deletions.push({ scope: 'covers', key: track.coverPath })
+
+    await Promise.all(
+      deletions.map((entry) =>
+        this.storageService.deleteObject(entry.scope, entry.key).catch(() => undefined),
+      ),
+    )
   }
 }

@@ -1,0 +1,63 @@
+groups:
+  - name: pine-v2-critical
+    interval: 15s
+    rules:
+      - alert: PineApiDown
+        expr: probe_success{endpoint="api-ready"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: API readiness probe is failing
+          description: The NestJS API is not passing readiness checks.
+
+      - alert: PineStreamMountDown
+        expr: probe_success{endpoint="stream-mount"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: Icecast stream mount is unavailable
+          description: Listeners cannot reach the live audio mount.
+
+      - alert: PinePlaybackHeartbeatMissing
+        expr: max by (station_id) (pine_playback_state_heartbeat_age_seconds) > 120
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: Playback heartbeat is stale
+          description: Playback state has not been synchronized for more than two minutes.
+
+      - alert: PineWorkerStalled
+        expr: max by (station_id) (pine_playback_commands_oldest_processing_age_seconds) > 180
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Playback worker appears stalled
+          description: A playback command has remained in processing for too long.
+
+      - alert: PineHighCommandBacklog
+        expr: max by (station_id) (pine_playback_commands_pending_total) > 25 or max by (station_id) (pine_playback_commands_oldest_pending_age_seconds) > 120
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Playback command backlog is growing
+          description: Pending commands are piling up or waiting too long.
+
+      - alert: PineOutboxBacklog
+        expr: max by (station_id) (pine_playback_events_unprocessed_total) > 25 or max by (station_id) (pine_playback_events_oldest_unprocessed_age_seconds) > 120
+        for: 2m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: Playback event outbox is backing up
+          description: Events are not being consumed quickly enough.

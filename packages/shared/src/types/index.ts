@@ -3,9 +3,6 @@
 export enum StationAccessMode {
   PUBLIC = 'PUBLIC',
   PRIVATE = 'PRIVATE',
-  // Legacy values kept for backward compatibility with old records.
-  CODE_ONLY = 'CODE_ONLY',
-  CODE_PASSWORD = 'CODE_PASSWORD',
 }
 
 export enum MemberRole {
@@ -61,6 +58,40 @@ export enum SystemQueueMode {
   SEQUENTIAL = 'SEQUENTIAL',
   SHUFFLE = 'SHUFFLE',
   SMART_SHUFFLE = 'SMART_SHUFFLE',
+}
+
+export enum PlaybackCommandType {
+  PLAY = 'PLAY',
+  PAUSE = 'PAUSE',
+  PREVIOUS = 'PREVIOUS',
+  SKIP = 'SKIP',
+  SEEK = 'SEEK',
+  SET_LOOP = 'SET_LOOP',
+  SET_SHUFFLE = 'SET_SHUFFLE',
+  QUEUE_ADD = 'QUEUE_ADD',
+  QUEUE_REMOVE = 'QUEUE_REMOVE',
+  QUEUE_REORDER = 'QUEUE_REORDER',
+}
+
+export enum PlaybackCommandStatus {
+  PENDING = 'PENDING',
+  PROCESSING = 'PROCESSING',
+  ACKED = 'ACKED',
+  REJECTED = 'REJECTED',
+  EXPIRED = 'EXPIRED',
+}
+
+export enum PlaybackEventType {
+  STATE_SNAPSHOT = 'STATE_SNAPSHOT',
+  STATE_CHANGED = 'STATE_CHANGED',
+  TRACK_CHANGED = 'TRACK_CHANGED',
+  COMMAND_RECEIVED = 'COMMAND_RECEIVED',
+  COMMAND_APPLIED = 'COMMAND_APPLIED',
+  COMMAND_REJECTED = 'COMMAND_REJECTED',
+  QUEUE_UPDATED = 'QUEUE_UPDATED',
+  SYNC_TICK = 'SYNC_TICK',
+  DRIFT_CORRECTED = 'DRIFT_CORRECTED',
+  HEARTBEAT = 'HEARTBEAT',
 }
 
 // ─── Permissions ─────────────────────────────────────────────────────────────
@@ -227,34 +258,41 @@ export interface WsStationJoin {
   password?: string
 }
 
-export interface WsPlaybackControl {
-  action: 'play' | 'pause' | 'seek' | 'skip'
-  position?: number
-}
-
-export interface WsQueueAdd {
-  trackId: string
-  mode?: 'end' | 'next' | 'now'
-  beforeItemId?: string
-}
-
-export interface WsQueueReorder {
-  items: Array<{ id: string; position: number }>
-}
-
-export interface WsQueueRemove {
-  itemId: string
-}
-
 export interface WsPlaybackSync {
   currentTrackId: string | null
   position: number
   isPaused: boolean
   trackStartedAt: number | null
+  currentQueueType?: QueueType | null
+  loopMode?: 'none' | 'track' | 'queue'
+  shuffleEnabled?: boolean
+  serverTime?: number
+  syncType?: 'heartbeat' | 'control' | 'track_changed'
 }
 
-export interface WsTrackEnded {
-  trackId?: string
+export interface PlaybackCommand {
+  id: string
+  stationId: string
+  type: PlaybackCommandType
+  status: PlaybackCommandStatus
+  payload: Record<string, unknown> | null
+  createdById: string | null
+  correlationId: string | null
+  appliedAt: string | null
+  rejectedAt: string | null
+  errorMessage: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface PlaybackEvent {
+  id: string
+  stationId: string
+  type: PlaybackEventType
+  payload: Record<string, unknown> | null
+  commandId: string | null
+  createdAt: string
+  processedAt: string | null
 }
 
 export interface WsChatSend {

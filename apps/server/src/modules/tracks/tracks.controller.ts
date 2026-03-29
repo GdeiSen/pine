@@ -11,7 +11,6 @@ import {
   UseInterceptors,
   UploadedFile,
   Res,
-  Headers,
   HttpCode,
   HttpStatus,
   BadRequestException,
@@ -22,6 +21,7 @@ import { SkipThrottle } from '@nestjs/throttler'
 import { diskStorage } from 'multer'
 import * as path from 'path'
 import * as fs from 'fs'
+import * as os from 'os'
 import { v4 as uuid } from 'uuid'
 import { Response } from 'express'
 import { TracksService } from './tracks.service'
@@ -43,21 +43,8 @@ export class TracksController {
   @UseInterceptors(
     FileInterceptor('file', {
       storage: diskStorage({
-        destination: (req: any, _file, cb) => {
-          const stationId = String(req.params?.stationId ?? '')
-          if (!/^[0-9a-f-]{36}$/i.test(stationId)) {
-            cb(new BadRequestException('Invalid station ID') as any, '')
-            return
-          }
-
-          const storagePath = path.resolve(process.env.STORAGE_PATH ?? './storage')
-          const dir = path.join(storagePath, 'stations', stationId, 'tracks')
-          const normalizedDir = path.resolve(dir)
-          if (!normalizedDir.startsWith(`${storagePath}${path.sep}`)) {
-            cb(new BadRequestException('Invalid upload path') as any, '')
-            return
-          }
-
+        destination: (_req: any, _file, cb) => {
+          const dir = path.join(os.tmpdir(), 'pine-uploads')
           fs.mkdirSync(dir, { recursive: true })
           cb(null, dir)
         },
@@ -94,19 +81,6 @@ export class TracksController {
     @CurrentUser() user: { id: string },
   ) {
     return this.tracksService.getStationTracks(stationId, user.id)
-  }
-
-  @Get('tracks/:id/stream')
-  @UseGuards(OptionalJwtGuard)
-  @SkipThrottle()
-  async stream(
-    @Param('id', new ParseUUIDPipe()) id: string,
-    @Query('quality') quality: string | undefined,
-    @Headers('range') range: string,
-    @CurrentUser() user: { id: string } | null,
-    @Res() res: Response,
-  ) {
-    return this.tracksService.streamTrack(id, range, res, quality, user?.id)
   }
 
   @Get('tracks/:id/cover')

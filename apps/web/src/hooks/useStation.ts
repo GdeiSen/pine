@@ -1,33 +1,55 @@
 'use client'
 
-import { useEffect, useRef, useCallback } from 'react'
-import { Howl, Howler } from 'howler'
+import { useCallback, useEffect, useRef } from 'react'
+import { PlaybackCommandType, WS_EVENTS_V2 } from '@web-radio/shared'
 import { getSocket } from '@/lib/socket'
-import api from '@/lib/api'
+import api, { fetchStationStreamInfo } from '@/lib/api'
 import { useStationStore } from '@/stores/station.store'
 import { useAudioStore } from '@/stores/audio.store'
-// re-export store for direct getState() access inside intervals
-const stationStore = useStationStore
-import { WS_EVENTS, SYNC_THRESHOLD_SECONDS } from '@web-radio/shared'
+import { useRadioPlaybackEngine, normalizeTrackStartedAt } from './useRadioPlaybackEngine'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api'
 const TIME_SYNC_INTERVAL_MS = 15_000
 const TIME_SYNC_EMA_ALPHA = 0.2
-const HARD_SYNC_DRIFT_SECONDS = Math.max(SYNC_THRESHOLD_SECONDS * 2, 4)
-const HTML5_POOL_SIZE = 16
-
-const howlerGlobal = Howler as any
-howlerGlobal.html5PoolSize = Math.max(howlerGlobal.html5PoolSize ?? 0, HTML5_POOL_SIZE)
 
 export function useStation(code: string, joinPassword?: string | null) {
   const store = useStationStore()
+  const {
+    setStation,
+    setStationStreamUrl,
+    setPlayback,
+    setQueue,
+    setMembers,
+    addChatMessage,
+    setConnecting,
+    setConnected,
+    setAudioConnection,
+    reset,
+  } = store
   const volume = useAudioStore((s) => s.volume)
-  const howlRef = useRef<Howl | null>(null)
-  const soundIdRef = useRef<number | null>(null)
-  const playbackTokenRef = useRef(0)
+  const socket = getSocket()
   const serverOffsetRef = useRef<number | null>(null)
   const bestServerOffsetRef = useRef<{ offsetMs: number; rttMs: number } | null>(null)
-  const socket = getSocket()
+  const localTickAnchorRef = useRef<number | null>(null)
+  const pendingTrackSyncRef = useRef<{ trackId: string; sinceMs: number } | null>(null)
+
+  const audio = useRadioPlaybackEngine({
+    streamUrl: store.stationStreamUrl,
+    isPlaying: !!store.playback.currentTrack && !store.playback.isPaused,
+    volume,
+  })
+
+  useEffect(() => {
+    setAudioConnection({
+      state: audio.audioConnectionState,
+      message: audio.audioConnectionMessage,
+      diagnostics: audio.audioDiagnostics,
+    })
+  }, [
+    audio.audioConnectionMessage,
+    audio.audioConnectionState,
+    audio.audioDiagnostics,
+    setAudioConnection,
+  ])
 
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -47,12 +69,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     }
 
     document.title = 'PINE'
-  }, [
-    store.playback.currentTrack?.id,
-    store.playback.currentTrack?.title,
-    store.playback.currentTrack?.artist,
-    store.station?.name,
-  ])
+  }, [store.playback.currentTrack?.artist, store.playback.currentTrack?.id, store.playback.currentTrack?.title, store.station?.name])
 
   useEffect(() => {
     return () => {
@@ -60,25 +77,6 @@ export function useStation(code: string, joinPassword?: string | null) {
         document.title = 'PINE'
       }
     }
-  }, [])
-
-  const getStreamUrl = (trackId: string) => {
-    const quality = stationStore.getState().station?.streamQuality ?? 'HIGH'
-    return `${API_URL}/tracks/${trackId}/stream?quality=${quality}`
-  }
-
-  const destroyHowl = useCallback(() => {
-    if (!howlRef.current) return
-
-    howlRef.current.off()
-    howlRef.current.stop()
-    howlRef.current.unload()
-    howlRef.current = null
-    soundIdRef.current = null
-  }, [])
-
-  const getEstimatedServerNow = useCallback(() => {
-    return Date.now() + (serverOffsetRef.current ?? 0)
   }, [])
 
   const registerTimeSyncSample = useCallback((clientTs: number, serverTs: number) => {
@@ -107,190 +105,166 @@ export function useStation(code: string, joinPassword?: string | null) {
     serverOffsetRef.current = nextOffset
   }, [])
 
-  const getStartPositionFromServer = useCallback((trackStartedAt?: number | null, duration?: number | null) => {
-    if (!trackStartedAt) return 0
-
-    const estimatedPosition = Math.max(0, (getEstimatedServerNow() - trackStartedAt) / 1000)
-    if (typeof duration === 'number' && Number.isFinite(duration)) {
-      return Math.min(estimatedPosition, Math.max(0, duration - 0.25))
+  useEffect(() => {
+    if (!code) {
+      setConnecting(false)
+      return
     }
 
-    return estimatedPosition
-  }, [getEstimatedServerNow])
+    let cancelled = false
 
-  const playTrack = useCallback((trackId: string, startPosition = 0, shouldStartPlaying = true) => {
-    const token = ++playbackTokenRef.current
-    destroyHowl()
-
-    const getState = () => stationStore.getState()
-
-    const applyIfCurrent = (fn: () => void) => {
-      if (playbackTokenRef.current !== token || howlRef.current !== howl) return
-      fn()
+    const refreshStreamInfo = async () => {
+      const info = await fetchStationStreamInfo(code, true)
+      if (cancelled) return
+      if (info?.streamUrl) {
+        setStationStreamUrl(info.streamUrl)
+      }
     }
 
-    const howl = new Howl({
-      src: [getStreamUrl(trackId)],
-      html5: true,
-      pool: 10,
-      volume: useAudioStore.getState().volume,
-      preload: true,
-      format: ['mp3', 'flac', 'wav', 'aac', 'ogg'],
-      onload: () => {
-        applyIfCurrent(() => {
-          const initialPosition = Math.max(0, startPosition)
-          howl.seek(initialPosition)
-          howl.rate(1)
-          if (shouldStartPlaying) {
-            const nextSoundId = howl.play()
-            if (typeof nextSoundId === 'number') {
-              soundIdRef.current = nextSoundId
-            }
-            getState().setPlayback({ currentPosition: initialPosition, isPlaying: true, isPaused: false })
-          } else {
-            getState().setPlayback({ currentPosition: initialPosition, isPlaying: false, isPaused: true })
-          }
-        })
-      },
-      onplay: (id) => {
-        applyIfCurrent(() => {
-          soundIdRef.current = id
-          getState().setAudioNeedsRestart(false)
-          getState().setPlayback({ isPlaying: true, isPaused: false })
-        })
-      },
-      onpause: (id) => {
-        applyIfCurrent(() => {
-          if (soundIdRef.current === id) {
-            getState().setPlayback({ isPaused: true })
-          }
-        })
-      },
-      onstop: (id) => {
-        applyIfCurrent(() => {
-          if (soundIdRef.current === id) {
-            getState().setPlayback({ isPlaying: false, isPaused: true })
-          }
-        })
-      },
-      onend: (id) => {
-        applyIfCurrent(() => {
-          if (soundIdRef.current === id) {
-            getState().setPlayback({ isPlaying: false, isPaused: true })
-          }
-        })
-      },
-      onloaderror: (_, err) => {
-        applyIfCurrent(() => {
-          console.error('Howl load error:', err)
-        })
-      },
-      onplayerror: () => {
-        applyIfCurrent(() => {
-          getState().setAudioNeedsRestart(true)
-        })
-      },
-    })
+    const refreshStationSnapshot = async () => {
+      try {
+        const res = await api.get(`/stations/${code}`)
+        if (cancelled) return
 
-    howlRef.current = howl
-  }, [destroyHowl])
+        const snapshot = res.data as {
+          currentTrack?: unknown
+          currentQueueType?: 'USER' | 'SYSTEM' | null
+          currentPosition?: number
+          isPaused?: boolean
+          trackStartedAt?: string | number | null
+          station?: unknown
+        }
 
-  useEffect(() => {
-    if (!howlRef.current) return
-    howlRef.current.volume(volume)
-  }, [volume])
-
-  useEffect(() => {
-    if (!code) return
-
-    const getState = () => stationStore.getState()
-    const setConnecting = (value: boolean) => getState().setConnecting(value)
-    const setConnected = (value: boolean) => getState().setConnected(value)
+        const station = snapshot.station ?? snapshot
+        setStation(station as any)
+        setPlayback({
+          currentTrack: snapshot.currentTrack as any ?? null,
+          currentQueueType: snapshot.currentQueueType ?? null,
+          trackStartedAt: normalizeTrackStartedAt(snapshot.trackStartedAt),
+          currentPosition:
+            typeof snapshot.currentPosition === 'number' && Number.isFinite(snapshot.currentPosition)
+              ? Math.max(0, snapshot.currentPosition)
+              : 0,
+          isPaused: snapshot.isPaused ?? false,
+          isPlaying: !!snapshot.currentTrack && !snapshot.isPaused,
+        })
+      } catch {
+        // best-effort state refresh
+      }
+    }
 
     setConnecting(true)
+    setStationStreamUrl(null)
+    void refreshStreamInfo()
     socket.connect()
 
-    // Join station
-    socket.emit(WS_EVENTS.STATION_JOIN, {
+    socket.emit(WS_EVENTS_V2.STATION_JOIN, {
       code,
       ...(joinPassword ? { password: joinPassword } : {}),
     })
 
     const requestTimeSync = () => {
       const clientTs = Date.now()
-      socket.emit(WS_EVENTS.TIME_SYNC, { clientTs }, (ack?: { clientTs?: number; serverTs?: number }) => {
+      socket.emit(WS_EVENTS_V2.TIME_SYNC, { clientTs }, (ack?: { clientTs?: number; serverTs?: number }) => {
         if (!ack || ack.clientTs !== clientTs || typeof ack.serverTs !== 'number') return
         registerTimeSyncSample(clientTs, ack.serverTs)
       })
     }
 
     const handleStationState = (state: any) => {
-      const s = getState()
-      s.setStation(state.station)
-      s.setQueue(state.queue ?? [])
-      s.setMembers(state.members ?? [])
-      s.setPlayback({
-        loopMode: state.loopMode ?? 'none',
-        shuffleEnabled: state.shuffleEnabled ?? false,
-      })
-
-      if (state.currentTrack) {
-        const startPosition = getStartPositionFromServer(state.trackStartedAt, state.currentTrack.duration)
-        s.setPlayback({
-          currentTrack: state.currentTrack,
+      const startedAt = normalizeTrackStartedAt(state.trackStartedAt)
+      const nextTrackId = state.currentTrack?.id ?? null
+      setStation(state.station)
+      setQueue(state.queue ?? [])
+      setMembers(state.members ?? [])
+        setPlayback({
+          currentTrack: state.currentTrack ?? null,
           currentQueueType: state.currentQueueType ?? null,
-          isPaused: state.isPaused,
-          trackStartedAt: state.trackStartedAt,
-          currentPosition: startPosition,
-          isPlaying: !state.isPaused,
+          isPaused: state.isPaused ?? false,
+          trackStartedAt: startedAt,
+          currentPosition:
+            typeof state.currentPosition === 'number' && Number.isFinite(state.currentPosition)
+              ? Math.max(0, state.currentPosition)
+              : 0,
+          isPlaying: !!state.currentTrack && !state.isPaused,
         })
-
-        playTrack(state.currentTrack.id, startPosition, !state.isPaused)
+      if (!nextTrackId) {
+        pendingTrackSyncRef.current = null
       }
+      localTickAnchorRef.current = Date.now()
 
-      setConnected(true)
       setConnecting(false)
+      setConnected(true)
+      if (!useStationStore.getState().stationStreamUrl) {
+        void refreshStreamInfo()
+      }
     }
-    socket.on(WS_EVENTS.STATION_STATE, handleStationState)
+    socket.on(WS_EVENTS_V2.STATION_STATE, handleStationState)
 
     const handleTrackChanged = (data: any) => {
+      const previousTrackId = useStationStore.getState().playback.currentTrack?.id ?? null
       const nextTrack = data.track ?? null
-      const startPosition = nextTrack
-        ? getStartPositionFromServer(data.trackStartedAt, nextTrack.duration)
-        : 0
+      const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
 
-      getState().setPlayback({
+      setPlayback({
         currentTrack: nextTrack,
         currentQueueType: data.currentQueueType ?? null,
-        trackStartedAt: data.trackStartedAt,
-        isPaused: false,
-        currentPosition: 0,
-        isPlaying: !!nextTrack,
+        trackStartedAt: startedAt,
+        isPaused: data.isPaused ?? false,
+        currentPosition:
+          typeof data.currentPosition === 'number' && Number.isFinite(data.currentPosition)
+            ? Math.max(0, data.currentPosition)
+            : 0,
+        isPlaying: !!nextTrack && !data.isPaused,
       })
-      if (data.queue) getState().setQueue(data.queue)
+      localTickAnchorRef.current = Date.now()
+      const nextTrackId = nextTrack?.id ?? null
+      if (nextTrackId && nextTrackId !== previousTrackId) {
+        pendingTrackSyncRef.current = { trackId: nextTrackId, sinceMs: Date.now() }
+        void audio.restartAudio()
+      } else if (!nextTrackId) {
+        pendingTrackSyncRef.current = null
+      }
 
-      if (nextTrack) {
-        playTrack(nextTrack.id, startPosition)
-      } else {
-        destroyHowl()
-        getState().setPlayback({ isPlaying: false, isPaused: true })
+      if (data.queue) setQueue(data.queue)
+      if (!nextTrack && data.currentTrackId) {
+        void refreshStationSnapshot()
       }
     }
-    socket.on(WS_EVENTS.TRACK_CHANGED, handleTrackChanged)
+    socket.on(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)
 
     const handlePlaybackSync = (data: any) => {
-      const currentTrackId = getState().playback.currentTrack?.id
+      const currentTrackId = useStationStore.getState().playback.currentTrack?.id
       if (data.currentTrackId && data.currentTrackId !== currentTrackId) {
+        void refreshStationSnapshot()
         return
       }
+      const syncTrackId = typeof data.currentTrackId === 'string' ? data.currentTrackId : null
+      const pending = pendingTrackSyncRef.current
+      const pendingActive =
+        !!pending &&
+        pending.trackId === syncTrackId &&
+        useStationStore.getState().audioConnectionState !== 'playing'
+      if (pending && !pendingActive) {
+        pendingTrackSyncRef.current = null
+      }
+      const freezePositionWhileReconnecting =
+        pendingActive
 
-      const targetPosition = typeof data.position === 'number' && Number.isFinite(data.position)
-        ? Math.max(0, data.position)
-        : getState().playback.currentPosition
-      const nextIsPaused = typeof data.isPaused === 'boolean' ? data.isPaused : getState().playback.isPaused
-      const nextTrackStartedAt = typeof data.trackStartedAt === 'number' ? data.trackStartedAt : getState().playback.trackStartedAt
+      const targetPosition =
+        freezePositionWhileReconnecting
+          ? useStationStore.getState().playback.currentPosition
+          : typeof data.position === 'number' && Number.isFinite(data.position)
+          ? Math.max(0, data.position)
+          : typeof data.currentPosition === 'number' && Number.isFinite(data.currentPosition)
+            ? Math.max(0, data.currentPosition)
+            : useStationStore.getState().playback.currentPosition
+      const nextIsPaused =
+        typeof data.isPaused === 'boolean' ? data.isPaused : useStationStore.getState().playback.isPaused
+      const nextTrackStartedAt =
+        normalizeTrackStartedAt(data.trackStartedAt) ?? useStationStore.getState().playback.trackStartedAt
 
-      getState().setPlayback({
+      setPlayback({
         currentPosition: targetPosition,
         isPaused: nextIsPaused,
         trackStartedAt: nextTrackStartedAt,
@@ -298,51 +272,45 @@ export function useStation(code: string, joinPassword?: string | null) {
         ...(data.loopMode !== undefined && { loopMode: data.loopMode }),
         ...(data.shuffleEnabled !== undefined && { shuffleEnabled: data.shuffleEnabled }),
       })
-
-      const howl = howlRef.current
-      if (!howl) return
-      const soundId = soundIdRef.current ?? undefined
-      const syncType = data.syncType ?? data.type ?? 'heartbeat'
-
-      if (!nextIsPaused && howl.state() === 'loaded') {
-        const currentSeekRaw = howl.seek(soundId)
-        const currentSeek = typeof currentSeekRaw === 'number' ? currentSeekRaw : 0
-        const diff = currentSeek - targetPosition // positive = client ahead, negative = behind
-        const absDiff = Math.abs(diff)
-        const isHardSync = syncType === 'control' || syncType === 'track_changed'
-        const shouldHardSeek = isHardSync || absDiff >= HARD_SYNC_DRIFT_SECONDS || (syncType !== 'heartbeat' && absDiff > SYNC_THRESHOLD_SECONDS)
-
-        if (shouldHardSeek) {
-          howl.seek(targetPosition, soundId)
-          howl.rate(1, soundId)
-          getState().setPlayback({ currentPosition: targetPosition })
-        } else if (soundId !== undefined) {
-          // Keep pitch/timbre stable on heartbeat syncs: no playbackRate nudging.
-          howl.rate(1, soundId)
-        }
-
-        // Do not auto-create additional sound instances here.
-        // If browser blocks autoplay, we show explicit restart UI to avoid layered streams.
-        if (soundId !== undefined && !howl.playing(soundId)) {
-          howl.play(soundId)
-        }
+      localTickAnchorRef.current = Date.now()
+      if (Array.isArray(data?.queue)) {
+        setQueue(data.queue)
       }
 
-      if (nextIsPaused && soundId !== undefined && howl.playing(soundId)) {
-        howl.pause(soundId)
-        howl.rate(1, soundId)
-      }
+      audio.reportDrift({
+        targetPosition,
+        actualPosition: audio.audioRef.current?.currentTime ?? null,
+        syncType: typeof data.syncType === 'string' ? data.syncType : typeof data.sourceType === 'string' ? data.sourceType : 'ws-sync',
+        rttMs: typeof data.rttMs === 'number' ? data.rttMs : null,
+      })
+
     }
-    socket.on(WS_EVENTS.PLAYBACK_SYNC, handlePlaybackSync)
+    socket.on(WS_EVENTS_V2.PLAYBACK_SYNC, handlePlaybackSync)
 
-    const handleQueueUpdated = (data: any) => getState().setQueue(data.queue)
-    socket.on(WS_EVENTS.QUEUE_UPDATED, handleQueueUpdated)
+    const handleQueueUpdated = (data: any) => {
+      if (Array.isArray(data?.queue)) {
+        setQueue(data.queue)
+        return
+      }
 
-    const handleChatMessage = (msg: any) => getState().addChatMessage(msg)
-    socket.on(WS_EVENTS.CHAT_MESSAGE, handleChatMessage)
+      const stationId = useStationStore.getState().station?.id
+      if (!stationId) return
+      api
+        .get(`/stations/${stationId}/queue/snapshot`)
+        .then((res) => {
+          if (Array.isArray(res.data)) {
+            setQueue(res.data)
+          }
+        })
+        .catch(() => {})
+    }
+    socket.on(WS_EVENTS_V2.QUEUE_UPDATED, handleQueueUpdated)
+
+    const handleChatMessage = (msg: any) => addChatMessage(msg)
+    socket.on(WS_EVENTS_V2.CHAT_MESSAGE, handleChatMessage)
 
     const handleListenerJoined = (data: any) => {
-      const s = stationStore.getState()
+      const s = useStationStore.getState()
       if (s.station && typeof data?.listenerCount === 'number') {
         s.setStation({ ...s.station, listenerCount: data.listenerCount })
       }
@@ -360,19 +328,17 @@ export function useStation(code: string, joinPassword?: string | null) {
 
       s.setMembers([...s.members, { ...joinedMember, isOnline: true }])
     }
-    socket.on(WS_EVENTS.LISTENER_JOINED, handleListenerJoined)
+    socket.on(WS_EVENTS_V2.LISTENER_JOINED, handleListenerJoined)
 
     const handleListenerLeft = (data: any) => {
-      const s = stationStore.getState()
+      const s = useStationStore.getState()
       if (s.station && typeof data?.listenerCount === 'number') {
         s.setStation({ ...s.station, listenerCount: data.listenerCount })
       }
       if (!data?.userId) return
-      s.setMembers(
-        s.members.map((m) => (m.user.id === data.userId ? { ...m, isOnline: false } : m)),
-      )
+      s.setMembers(s.members.map((m) => (m.user.id === data.userId ? { ...m, isOnline: false } : m)))
     }
-    socket.on(WS_EVENTS.LISTENER_LEFT, handleListenerLeft)
+    socket.on(WS_EVENTS_V2.LISTENER_LEFT, handleListenerLeft)
 
     const handleConnect = () => {
       setConnected(true)
@@ -383,114 +349,182 @@ export function useStation(code: string, joinPassword?: string | null) {
     const handleDisconnect = () => setConnected(false)
     socket.on('disconnect', handleDisconnect)
 
-    // Heartbeat
     const heartbeat = setInterval(() => {
-      socket.emit(WS_EVENTS.HEARTBEAT)
+      socket.emit(WS_EVENTS_V2.HEARTBEAT)
     }, 30_000)
 
     requestTimeSync()
     const timeSync = setInterval(requestTimeSync, TIME_SYNC_INTERVAL_MS)
+    const streamInfoRefresh = setInterval(() => {
+      if (cancelled) return
+      void refreshStreamInfo()
+    }, 10_000)
 
-    // Smooth progress bar — update position locally every 250ms
-    const ticker = setInterval(() => {
-      const s = stationStore.getState()
-      const { isPaused, trackStartedAt } = s.playback
-      if (!isPaused && trackStartedAt) {
-        s.setPlayback({ currentPosition: Math.max(0, (getEstimatedServerNow() - trackStartedAt) / 1000) })
+      const ticker = setInterval(() => {
+      const s = useStationStore.getState()
+      const { isPaused, currentTrack, currentPosition } = s.playback
+      const pending = pendingTrackSyncRef.current
+      const pendingActive =
+        !!pending &&
+        !!currentTrack &&
+        pending.trackId === currentTrack.id &&
+        useStationStore.getState().audioConnectionState !== 'playing'
+      if (pending && !pendingActive) {
+        pendingTrackSyncRef.current = null
+      }
+      if (pendingActive) {
+        localTickAnchorRef.current = Date.now()
+        return
+      }
+      if (!isPaused && currentTrack && audio.audioConnectionState === 'playing') {
+        const now = Date.now()
+        const last = localTickAnchorRef.current ?? now
+        localTickAnchorRef.current = now
+        const deltaSec = Math.max(0, (now - last) / 1000)
+        const nextPosition = Math.min(
+          currentTrack.duration > 0 ? currentTrack.duration : Number.POSITIVE_INFINITY,
+          Math.max(0, currentPosition + deltaSec),
+        )
+        s.setPlayback({
+          currentPosition: nextPosition,
+        })
+      } else {
+        localTickAnchorRef.current = Date.now()
       }
     }, 250)
 
     return () => {
-      socket.emit(WS_EVENTS.STATION_LEAVE)
-      socket.off(WS_EVENTS.STATION_STATE, handleStationState)
-      socket.off(WS_EVENTS.TRACK_CHANGED, handleTrackChanged)
-      socket.off(WS_EVENTS.PLAYBACK_SYNC, handlePlaybackSync)
-      socket.off(WS_EVENTS.QUEUE_UPDATED, handleQueueUpdated)
-      socket.off(WS_EVENTS.CHAT_MESSAGE, handleChatMessage)
-      socket.off(WS_EVENTS.LISTENER_JOINED, handleListenerJoined)
-      socket.off(WS_EVENTS.LISTENER_LEFT, handleListenerLeft)
+      cancelled = true
+      socket.emit(WS_EVENTS_V2.STATION_LEAVE)
+      socket.off(WS_EVENTS_V2.STATION_STATE, handleStationState)
+      socket.off(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)
+      socket.off(WS_EVENTS_V2.PLAYBACK_SYNC, handlePlaybackSync)
+      socket.off(WS_EVENTS_V2.QUEUE_UPDATED, handleQueueUpdated)
+      socket.off(WS_EVENTS_V2.CHAT_MESSAGE, handleChatMessage)
+      socket.off(WS_EVENTS_V2.LISTENER_JOINED, handleListenerJoined)
+      socket.off(WS_EVENTS_V2.LISTENER_LEFT, handleListenerLeft)
       socket.off('connect', handleConnect)
       socket.off('disconnect', handleDisconnect)
       socket.disconnect()
-      playbackTokenRef.current += 1
-      destroyHowl()
       clearInterval(heartbeat)
       clearInterval(timeSync)
+      clearInterval(streamInfoRefresh)
       clearInterval(ticker)
-      getState().reset()
+      reset()
     }
-  }, [code, joinPassword, destroyHowl, getEstimatedServerNow, getStartPositionFromServer, playTrack, registerTimeSyncSample, socket])
+  }, [addChatMessage, code, joinPassword, registerTimeSyncSample, reset, setConnected, setConnecting, setMembers, setPlayback, setQueue, setStation, setStationStreamUrl, socket])
 
   const sendPlaybackControl = useCallback(
-    (action: string, position?: number, value?: string) => {
-      socket.emit(WS_EVENTS.PLAYBACK_CONTROL, { action, position, value })
+    async (action: string, position?: number, value?: string) => {
+      const stationId = useStationStore.getState().station?.id
+      const shuffleEnabled = useStationStore.getState().playback.shuffleEnabled
+
+      const command = (() => {
+        switch (action) {
+          case 'play':
+            return { type: PlaybackCommandType.PLAY as const }
+          case 'pause':
+            return { type: PlaybackCommandType.PAUSE as const }
+          case 'prev':
+            return { type: PlaybackCommandType.PREVIOUS as const }
+          case 'skip':
+            return { type: PlaybackCommandType.SKIP as const }
+          case 'seek':
+            return typeof position === 'number' && Number.isFinite(position)
+              ? { type: PlaybackCommandType.SEEK as const, payload: { position: Math.max(0, position) } }
+              : null
+          case 'set_loop':
+            return value ? { type: PlaybackCommandType.SET_LOOP as const, payload: { loopMode: value } } : null
+          case 'set_shuffle':
+            return {
+              type: PlaybackCommandType.SET_SHUFFLE as const,
+              payload: { shuffleEnabled: !shuffleEnabled },
+            }
+          default:
+            return null
+        }
+      })()
+
+      if (stationId && command) {
+        await api.post(`/stations/${stationId}/playback/commands`, command)
+      }
+    },
+    [],
+  )
+
+  const sendChatMessage = useCallback(
+    (content: string) => {
+      socket.emit(WS_EVENTS_V2.CHAT_SEND, { content })
     },
     [socket],
   )
-
-  const sendChatMessage = useCallback((content: string) => {
-    socket.emit(WS_EVENTS.CHAT_SEND, { content })
-  }, [socket])
 
   const restartAudio = useCallback(() => {
-    const s = stationStore.getState()
-    if (s.playback.currentTrack) {
-      const serverPosition = getStartPositionFromServer(s.playback.trackStartedAt, s.playback.currentTrack.duration)
-      const startPosition = s.playback.isPaused
-        ? s.playback.currentPosition
-        : serverPosition
+    void audio.restartAudio()
+    useStationStore.getState().setAudioNeedsRestart(false)
+  }, [audio])
 
-      // Strictly local reconnect:
-      // - never sends playback commands to the server
-      // - only re-creates client audio at current synced position
-      playTrack(
-        s.playback.currentTrack.id,
-        startPosition,
-        !s.playback.isPaused,
-      )
-    }
-
-    s.setAudioNeedsRestart(false)
-  }, [getStartPositionFromServer, playTrack])
-
-  const addToQueue = useCallback(
-    (
-      trackId: string,
-      options?: { mode?: 'end' | 'next' | 'now'; beforeItemId?: string },
-    ) => {
-      socket.emit(WS_EVENTS.QUEUE_ADD, { trackId, ...options })
-    },
-    [socket],
-  )
-
-  const removeFromQueue = useCallback((itemId: string) => {
-    const state = stationStore.getState()
+  const addToQueue = useCallback(async (trackId: string, options?: { mode?: 'end' | 'next' | 'now'; beforeItemId?: string }) => {
+    const state = useStationStore.getState()
     const stationId = state.station?.id
+    if (!stationId) return
 
-    // Optimistic local update for instant UI feedback.
+    await api.post(`/stations/${stationId}/playback/commands`, {
+      type: PlaybackCommandType.QUEUE_ADD,
+      payload: {
+        trackId,
+        mode: options?.mode ?? 'end',
+        ...(options?.beforeItemId ? { beforeItemId: options.beforeItemId } : {}),
+      },
+    })
+  }, [])
+
+  const removeFromQueue = useCallback(async (itemId: string) => {
+    const state = useStationStore.getState()
+    const stationId = state.station?.id
     state.setQueue(state.queue.filter((item) => item.id !== itemId))
-
-    // Primary path: WebSocket (keeps all listeners in sync).
-    socket.emit(WS_EVENTS.QUEUE_REMOVE, { itemId })
-
-    // Fallback path: HTTP endpoint (works even if WS event is not processed).
     if (stationId) {
-      api.delete(`/stations/${stationId}/queue/${itemId}`).catch(() => {})
+      await api.post(`/stations/${stationId}/playback/commands`, {
+        type: PlaybackCommandType.QUEUE_REMOVE,
+        payload: { itemId },
+      })
     }
-  }, [socket])
+  }, [])
 
-  const reorderQueue = useCallback((items: Array<{ id: string; position: number }>) => {
-    socket.emit(WS_EVENTS.QUEUE_REORDER, { items })
-  }, [socket])
+  const reorderQueue = useCallback(async (items: Array<{ id: string; position: number }>) => {
+    const stationId = useStationStore.getState().station?.id
+    if (!stationId) return
+
+    const state = useStationStore.getState()
+    const positionById = new Map(items.map((item) => [item.id, item.position]))
+    state.setQueue(
+      [...state.queue].sort((a, b) => {
+        const aPos = positionById.get(a.id)
+        const bPos = positionById.get(b.id)
+        if (aPos == null && bPos == null) return 0
+        if (aPos == null) return 1
+        if (bPos == null) return -1
+        return aPos - bPos
+      }),
+    )
+
+    await api.post(`/stations/${stationId}/playback/commands`, {
+      type: PlaybackCommandType.QUEUE_REORDER,
+      payload: { items },
+    })
+  }, [])
 
   return {
     ...store,
+    audioNeedsRestart: audio.audioNeedsRestart,
+    audioConnectionState: audio.audioConnectionState,
+    audioConnectionMessage: audio.audioConnectionMessage,
+    audioDiagnostics: audio.audioDiagnostics,
     sendPlaybackControl,
     sendChatMessage,
     restartAudio,
     addToQueue,
     removeFromQueue,
     reorderQueue,
-    howl: howlRef.current,
   }
 }

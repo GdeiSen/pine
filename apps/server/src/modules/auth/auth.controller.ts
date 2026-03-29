@@ -26,6 +26,7 @@ export class AuthController {
   async register(@Body() dto: RegisterDto, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.register(dto)
     this.setRefreshCookie(res, result.refreshToken)
+    this.setAccessCookie(res, result.accessToken)
     return { accessToken: result.accessToken, user: result.user }
   }
 
@@ -34,6 +35,7 @@ export class AuthController {
   async login(@Body() dto: LoginDto, @Res({ passthrough: true }) res: Response) {
     const result = await this.authService.login(dto)
     this.setRefreshCookie(res, result.refreshToken)
+    this.setAccessCookie(res, result.accessToken)
     return { accessToken: result.accessToken, user: result.user }
   }
 
@@ -43,6 +45,7 @@ export class AuthController {
     const refreshToken = req.cookies?.['refresh_token']
     const result = await this.authService.refresh(refreshToken)
     this.setRefreshCookie(res, result.refreshToken)
+    this.setAccessCookie(res, result.accessToken)
     return { accessToken: result.accessToken, user: result.user }
   }
 
@@ -53,6 +56,12 @@ export class AuthController {
     if (refreshToken) await this.authService.logout(refreshToken)
     res.clearCookie('refresh_token', {
       path: '/api/auth',
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+    })
+    res.clearCookie('access_token', {
+      path: '/',
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -78,6 +87,16 @@ export class AuthController {
       sameSite: 'lax',
       maxAge: 7 * 24 * 60 * 60 * 1000,
       path: '/api/auth',
+    })
+  }
+
+  private setAccessCookie(res: Response, token: string) {
+    res.cookie('access_token', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 15 * 60 * 1000,
+      path: '/',
     })
   }
 }

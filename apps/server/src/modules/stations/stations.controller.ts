@@ -47,6 +47,18 @@ export class StationsController {
     return this.stationsService.getPublicStations()
   }
 
+  @Get(':code/stream-info')
+  @UseGuards(OptionalJwtGuard)
+  getStreamInfo(
+    @Param('code') code: string,
+    @CurrentUser() user: { id: string } | null,
+  ) {
+    if (!/^\d{6}$/.test(code)) {
+      throw new BadRequestException('Invalid station code')
+    }
+    return this.stationsService.getStreamInfo(code, user?.id)
+  }
+
   @Get(':code')
   @UseGuards(OptionalJwtGuard)
   findByCode(@Param('code') code: string, @CurrentUser() user: { id: string } | null) {

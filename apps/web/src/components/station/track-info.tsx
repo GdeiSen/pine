@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { RulerProgressBar } from "@/components/station/ruler-progress";
 import {
@@ -12,9 +13,13 @@ import {
   Repeat1,
   Music2,
   RotateCw,
+  Loader2,
 } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001/api";
+const AUDIO_DEBUG_ENABLED =
+  process.env.NEXT_PUBLIC_AUDIO_DEBUG === "1" ||
+  process.env.NEXT_PUBLIC_AUDIO_DEBUG === "true";
 
 type LoopMode = "none" | "track" | "queue";
 
@@ -39,6 +44,23 @@ interface TrackInfoProps {
   stationCode: string;
   canControl: boolean;
   audioNeedsRestart: boolean;
+  audioConnectionState:
+    | "idle"
+    | "connecting"
+    | "buffering"
+    | "reconnecting"
+    | "playing"
+    | "paused"
+    | "blocked";
+  audioConnectionMessage: string | null;
+  audioDiagnostics: {
+    driftMs: number | null;
+    targetPosition: number | null;
+    actualPosition: number | null;
+    syncType: string | null;
+    rttMs: number | null;
+    updatedAt: number;
+  } | null;
   loopMode: LoopMode;
   shuffleEnabled: boolean;
   onPlayPause: () => void;
@@ -62,6 +84,9 @@ export function TrackInfo({
   stationCode,
   canControl,
   audioNeedsRestart,
+  audioConnectionState,
+  audioConnectionMessage,
+  audioDiagnostics,
   loopMode,
   shuffleEnabled,
   onPlayPause,
@@ -76,10 +101,62 @@ export function TrackInfo({
   const coverUrl = track?.hasCover
     ? `${API_URL}/tracks/${track.id}/cover`
     : null;
+  const [resolvedCoverUrl, setResolvedCoverUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!coverUrl) {
+      setResolvedCoverUrl(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    let objectUrl: string | null = null;
+
+    const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    fetch(coverUrl, {
+      method: "GET",
+      credentials: "include",
+      headers,
+      signal: controller.signal,
+    })
+      .then((response) => {
+        if (!response.ok) throw new Error(`cover ${response.status}`);
+        return response.blob();
+      })
+      .then((blob) => {
+        if (controller.signal.aborted) return;
+        objectUrl = URL.createObjectURL(blob);
+        setResolvedCoverUrl(objectUrl);
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setResolvedCoverUrl(coverUrl);
+      });
+
+    return () => {
+      controller.abort();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [coverUrl, track?.id]);
+
   const isActive = isPlaying && !isPaused;
   const LoopIcon = loopMode === "track" ? Repeat1 : Repeat;
   const playbackModeLabel =
     currentQueueType === "USER" ? "CUSTOM QUEUE" : "AUTO PLAY";
+  const showTransportBanner =
+    audioConnectionState !== "playing" &&
+    audioConnectionState !== "paused" &&
+    audioConnectionState !== "idle";
+  const transportLabel = (() => {
+    if (audioConnectionState === "blocked") return "Playback blocked"
+    if (audioConnectionState === "buffering") return "Buffering"
+    if (audioConnectionState === "reconnecting") return "Reconnecting"
+    if (audioConnectionState === "connecting") return "Connecting"
+    return "Playing"
+  })();
 
   return (
     <div className="p-6 flex flex-col gap-5">
@@ -123,7 +200,7 @@ export function TrackInfo({
           >
             {coverUrl ? (
               <img
-                src={coverUrl}
+                src={resolvedCoverUrl ?? coverUrl}
                 alt=""
                 className="w-full h-full object-cover"
               />
@@ -164,20 +241,49 @@ export function TrackInfo({
         </motion.div>
       </AnimatePresence>
 
-      {audioNeedsRestart ? (
+      {showTransportBanner || audioNeedsRestart ? (
         <div className="py-3 flex flex-col items-center justify-center gap-3">
-          <button
-            type="button"
-            onClick={onRestartAudio}
-            className="w-14 h-14 rounded-full flex items-center justify-center text-white"
-            style={{ background: "#E8440F" }}
-          >
-            <RotateCw size={20} />
-          </button>
-          <p className="text-xs text-[--text-muted] text-center">
-            Звук был заблокирован браузером. Нажмите кнопку, чтобы перезапустить
-            воспроизведение.
-          </p>
+          {showTransportBanner && (
+            <div className="w-full max-w-[640px] rounded-2xl border border-[--border] bg-[--bg-subtle] px-3 py-2 flex items-center gap-2">
+              <Loader2 size={14} className="text-[--text-muted] animate-spin" />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-medium text-[--text-primary] truncate">
+                  {transportLabel}
+                </p>
+                <p className="text-[11px] text-[--text-muted] truncate">
+                  {audioConnectionMessage ??
+                    "The player is handling the current stream state."}
+                </p>
+              </div>
+            </div>
+          )}
+          {AUDIO_DEBUG_ENABLED && audioDiagnostics && (
+            <p className="text-[10px] font-mono text-[--text-muted] text-center">
+              drift {audioDiagnostics.driftMs ?? "n/a"}ms
+              {" · "}
+              target {audioDiagnostics.targetPosition?.toFixed(2) ?? "n/a"}
+              {" · "}
+              actual {audioDiagnostics.actualPosition?.toFixed(2) ?? "n/a"}
+              {" · "}
+              sync {audioDiagnostics.syncType ?? "n/a"}
+            </p>
+          )}
+          {audioNeedsRestart && (
+            <>
+              <button
+                type="button"
+                onClick={onRestartAudio}
+                className="w-14 h-14 rounded-full flex items-center justify-center text-white"
+                style={{ background: "#E8440F" }}
+              >
+                <RotateCw size={20} />
+              </button>
+              <p className="text-xs text-[--text-muted] text-center">
+                Звук был заблокирован браузером. Нажмите кнопку, чтобы
+                перезапустить воспроизведение.
+              </p>
+            </>
+          )}
         </div>
       ) : (
         <>
