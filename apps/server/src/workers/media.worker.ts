@@ -14,16 +14,19 @@ const prisma = new PrismaClient()
 const minio = createMinioClientFromEnv()
 const buckets = resolveStorageBucketsFromEnv()
 
-const POLL_INTERVAL_MS = Number.parseInt(process.env.TRANSCODE_POLL_INTERVAL_MS ?? '1500', 10)
+const POLL_INTERVAL_MS = Number.parseInt(
+  process.env.MEDIA_POLL_INTERVAL_MS ?? process.env.TRANSCODE_POLL_INTERVAL_MS ?? '1500',
+  10,
+)
 const HEARTBEAT_INTERVAL_MS = Number.parseInt(
-  process.env.TRANSCODE_HEARTBEAT_INTERVAL_MS ?? '30000',
+  process.env.MEDIA_HEARTBEAT_INTERVAL_MS ?? process.env.TRANSCODE_HEARTBEAT_INTERVAL_MS ?? '30000',
   10,
 )
 const MAX_BATCH_PER_TICK = Number.parseInt(
-  process.env.TRANSCODE_MAX_BATCH_PER_TICK ?? '5',
+  process.env.MEDIA_MAX_BATCH_PER_TICK ?? process.env.TRANSCODE_MAX_BATCH_PER_TICK ?? '5',
   10,
 )
-const TMP_ROOT = path.join(os.tmpdir(), 'pine-transcode')
+const TMP_ROOT = path.join(os.tmpdir(), 'pine-media')
 
 function nowIso() {
   return new Date().toISOString()
@@ -60,6 +63,36 @@ function getMimeFromExt(filePath: string, fallback = 'application/octet-stream')
     '.gif': 'image/gif',
   }
   return map[ext] ?? fallback
+}
+
+function computeBitrateKbps(args: {
+  reportedBitrateBps?: number | null
+  durationSeconds?: number | null
+  fileSizeBytes?: number | null
+}) {
+  const reportedKbps =
+    typeof args.reportedBitrateBps === 'number' && Number.isFinite(args.reportedBitrateBps) && args.reportedBitrateBps > 0
+      ? Math.round(args.reportedBitrateBps / 1000)
+      : null
+
+  const estimatedKbps =
+    typeof args.durationSeconds === 'number' &&
+    Number.isFinite(args.durationSeconds) &&
+    args.durationSeconds > 0 &&
+    typeof args.fileSizeBytes === 'number' &&
+    Number.isFinite(args.fileSizeBytes) &&
+    args.fileSizeBytes > 0
+      ? Math.round((args.fileSizeBytes * 8) / (args.durationSeconds * 1000))
+      : null
+
+  if (reportedKbps && estimatedKbps) {
+    const ratio = reportedKbps / Math.max(estimatedKbps, 1)
+    if (ratio < 0.65 || ratio > 1.55) {
+      return estimatedKbps
+    }
+  }
+
+  return reportedKbps ?? estimatedKbps ?? null
 }
 
 async function resolveSharpFactory() {
@@ -190,6 +223,13 @@ async function processTrack(track: ClaimedTrack) {
     const metadata = await parseFile(input.localPath)
     const common = metadata?.common ?? {}
     const format = metadata?.format ?? {}
+    const duration = typeof format.duration === 'number' && Number.isFinite(format.duration) ? format.duration : 0
+    const assetDuration = duration > 0 ? duration : null
+    const bitrateKbps = computeBitrateKbps({
+      reportedBitrateBps: typeof format.bitrate === 'number' ? format.bitrate : null,
+      durationSeconds: duration,
+      fileSizeBytes: stat.size,
+    })
     const picture = common.picture?.[0]
 
     let coverAsset:
@@ -212,8 +252,8 @@ async function processTrack(track: ClaimedTrack) {
           album: track.album ?? common.album ?? null,
           year: track.year ?? common.year ?? null,
           genre: track.genre ?? common.genre?.[0] ?? null,
-          duration: format.duration ?? 0,
-          bitrate: format.bitrate ? Math.round(format.bitrate / 1000) : null,
+          duration,
+          bitrate: bitrateKbps,
           sampleRate: format.sampleRate ?? null,
           fileSize: stat.size,
           ...(coverAsset ? { coverPath: coverAsset.objectKey } : {}),
@@ -234,19 +274,19 @@ async function processTrack(track: ClaimedTrack) {
           objectKey: input.objectKey,
           mimeType: getMimeFromExt(track.filename, 'audio/mpeg'),
           byteSize: stat.size,
-          bitrate: format.bitrate ? Math.round(format.bitrate / 1000) : null,
+          bitrate: bitrateKbps,
           sampleRate: format.sampleRate ?? null,
           channels: format.numberOfChannels ?? null,
-          duration: format.duration ?? null,
+          duration: assetDuration,
         },
         update: {
           objectKey: input.objectKey,
           mimeType: getMimeFromExt(track.filename, 'audio/mpeg'),
           byteSize: stat.size,
-          bitrate: format.bitrate ? Math.round(format.bitrate / 1000) : null,
+          bitrate: bitrateKbps,
           sampleRate: format.sampleRate ?? null,
           channels: format.numberOfChannels ?? null,
-          duration: format.duration ?? null,
+          duration: assetDuration,
         },
       })
 
@@ -297,7 +337,7 @@ async function runLoop() {
         await processTrack(track)
       } catch (error) {
         const message = safeMessage(error)
-        console.error(`[${nowIso()}] transcode failed for track ${track.id}: ${message}`)
+        console.error(`[${nowIso()}] media processing failed for track ${track.id}: ${message}`)
         await prisma.track
           .update({
             where: { id: track.id },
@@ -316,7 +356,7 @@ async function runLoop() {
 async function shutdown() {
   if (stopped) return
   stopped = true
-  console.log(`[${nowIso()}] transcode-worker stopping`)
+  console.log(`[${nowIso()}] media-worker stopping`)
   try {
     await prisma.$disconnect()
   } finally {
@@ -326,16 +366,16 @@ async function shutdown() {
 
 async function bootstrap() {
   await prisma.$connect()
-  console.log(`[${nowIso()}] transcode-worker started`)
+  console.log(`[${nowIso()}] media-worker started`)
 
   setInterval(() => {
     void runLoop().catch((error) => {
-      console.error(`[${nowIso()}] transcode loop error: ${safeMessage(error)}`)
+      console.error(`[${nowIso()}] media loop error: ${safeMessage(error)}`)
     })
   }, Math.max(POLL_INTERVAL_MS, 200))
 
   setInterval(() => {
-    console.log(`[${nowIso()}] transcode-worker heartbeat`)
+    console.log(`[${nowIso()}] media-worker heartbeat`)
   }, Math.max(HEARTBEAT_INTERVAL_MS, 5_000))
 
   await runLoop()
@@ -350,7 +390,7 @@ process.on('SIGTERM', () => {
 })
 
 void bootstrap().catch(async (error) => {
-  console.error(`[${nowIso()}] transcode-worker bootstrap failed: ${safeMessage(error)}`)
+  console.error(`[${nowIso()}] media-worker bootstrap failed: ${safeMessage(error)}`)
   await prisma.$disconnect()
   process.exit(1)
 })

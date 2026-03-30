@@ -18,7 +18,7 @@ import { PrismaService } from '../../prisma/prisma.service'
 import { QueueService } from '../queue/queue.service'
 import { ChatService } from '../chat/chat.service'
 import { StationsService } from '../stations/stations.service'
-import { WS_EVENTS_V2, ChatMessageType } from '@web-radio/shared'
+import { WS_EVENTS_V2, ChatMessageType, StationPlaybackMode } from '@web-radio/shared'
 import { isAllowedOrigin, resolveAllowedOrigins } from '../../common/security/cors'
 
 interface AuthSocket extends Socket {
@@ -98,22 +98,32 @@ export class StationGateway
     @ConnectedSocket() client: AuthSocket,
     @MessageBody() data: { code: string; password?: string },
   ) {
-    if (!client.userId) throw new WsException('Authentication required')
     if (!/^\d{6}$/.test(data.code)) throw new WsException('Invalid station code')
-
-    try {
-      await this.stationsService.join(data.code, client.userId, data.password)
-    } catch (err: any) {
-      throw new WsException(err?.message ?? 'Failed to join station')
-    }
 
     const station = await this.prisma.station.findUnique({ where: { code: data.code } })
     if (!station) throw new WsException('Station not found')
 
+    // Allow anonymous listeners on public stations without a password.
+    const isPublicOpen = station.accessMode === 'PUBLIC' && !station.passwordHash
+    if (!client.userId && !isPublicOpen) {
+      throw new WsException('Authentication required')
+    }
+
+    if (client.userId) {
+      try {
+        await this.stationsService.join(data.code, client.userId, data.password)
+      } catch (err: any) {
+        throw new WsException(err?.message ?? 'Failed to join station')
+      }
+    } else if (station.passwordHash) {
+      throw new WsException('Authentication required')
+    }
+
     await client.join(station.id)
     client.stationId = station.id
 
-    this.socketMeta.set(client.id, { userId: client.userId, stationId: station.id })
+    const effectiveUserId = client.userId ?? `anon:${client.id}`
+    this.socketMeta.set(client.id, { userId: effectiveUserId, stationId: station.id })
     if (!this.stationSockets.has(station.id)) {
       this.stationSockets.set(station.id, new Set())
     }
@@ -124,34 +134,36 @@ export class StationGateway
     const state = await this.buildStationState(station.id)
     client.emit(WS_EVENTS_V2.STATION_STATE, state)
 
-    const member = await this.prisma.stationMember.findUnique({
-      where: { stationId_userId: { stationId: station.id, userId: client.userId } },
-      include: { user: { select: { id: true, username: true, avatar: true } } },
-    })
+    if (client.userId) {
+      const member = await this.prisma.stationMember.findUnique({
+        where: { stationId_userId: { stationId: station.id, userId: client.userId } },
+        include: { user: { select: { id: true, username: true, avatar: true } } },
+      })
 
-    this.server.to(station.id).except(client.id).emit(WS_EVENTS_V2.LISTENER_JOINED, {
-      userId: client.userId,
-      username: client.username,
-      listenerCount: this.stationSockets.get(station.id)?.size ?? 1,
-      member: member
-        ? {
-            id: member.id,
-            stationId: member.stationId,
-            user: member.user,
-            role: member.role,
-            permissions: JSON.parse(member.permissions),
-            joinedAt: member.joinedAt,
-            isOnline: true,
-          }
-        : null,
-    })
+      this.server.to(station.id).except(client.id).emit(WS_EVENTS_V2.LISTENER_JOINED, {
+        userId: client.userId,
+        username: client.username,
+        listenerCount: this.stationSockets.get(station.id)?.size ?? 1,
+        member: member
+          ? {
+              id: member.id,
+              stationId: member.stationId,
+              user: member.user,
+              role: member.role,
+              permissions: JSON.parse(member.permissions),
+              joinedAt: member.joinedAt,
+              isOnline: true,
+            }
+          : null,
+      })
 
-    const msg = await this.chatService.createSystemMessage(
-      station.id,
-      `${client.username ?? 'Anonymous'} joined the station`,
-      ChatMessageType.USER_JOINED,
-    )
-    this.server.to(station.id).emit(WS_EVENTS_V2.CHAT_MESSAGE, msg)
+      const msg = await this.chatService.createSystemMessage(
+        station.id,
+        `${client.username ?? 'Anonymous'} joined the station`,
+        ChatMessageType.USER_JOINED,
+      )
+      this.server.to(station.id).emit(WS_EVENTS_V2.CHAT_MESSAGE, msg)
+    }
 
     return { success: true, stationId: station.id }
   }
@@ -299,10 +311,11 @@ export class StationGateway
         isPasswordProtected: !!station.passwordHash,
         crossfadeDuration: station.crossfadeDuration,
         streamQuality: station.streamQuality,
+        playbackMode: this.resolvePlaybackMode(station.playbackMode),
         activePlaylistId: station.activePlaylistId,
         listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
       },
-      currentTrack,
+      currentTrack: this.toClientTrack(currentTrack),
       currentPosition: this.getPlaybackPosition(playback),
       isPaused: playback.isPaused,
       trackStartedAt: playback.trackStartedAt ? playback.trackStartedAt.getTime() : null,
@@ -344,10 +357,63 @@ export class StationGateway
     return Math.max(0, position)
   }
 
+  private toClientTrack(
+    track: {
+      id: string
+      filename: string
+      title: string | null
+      artist: string | null
+      album: string | null
+      year: number | null
+      genre: string | null
+      duration: number
+      bitrate: number | null
+      coverPath: string | null
+      quality: string
+      uploadedBy: {
+        id: string
+        username: string
+        avatar: string | null
+      }
+    } | null,
+  ) {
+    if (!track) return null
+
+    return {
+      id: track.id,
+      filename: track.filename,
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      year: track.year,
+      genre: track.genre,
+      duration: track.duration,
+      bitrate: track.bitrate,
+      hasCover: !!track.coverPath,
+      quality: track.quality,
+      uploadedBy: track.uploadedBy,
+    }
+  }
+
   private toClientLoopMode(mode: PlaybackLoopMode) {
     if (mode === PlaybackLoopMode.TRACK) return 'track'
     if (mode === PlaybackLoopMode.QUEUE) return 'queue'
     return 'none'
+  }
+
+  private resolvePlaybackMode(playbackMode?: string | null) {
+    if (this.isDirectOnlyDeployment()) {
+      return StationPlaybackMode.DIRECT
+    }
+
+    return playbackMode === StationPlaybackMode.BROADCAST
+      ? StationPlaybackMode.BROADCAST
+      : StationPlaybackMode.DIRECT
+  }
+
+  private isDirectOnlyDeployment() {
+    const mode = this.configService.get<string>('APP_DEPLOYMENT_MODE')?.trim().toLowerCase()
+    return mode === 'direct'
   }
 
   private getOnlineUserIds(stationId: string) {

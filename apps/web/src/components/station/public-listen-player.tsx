@@ -1,10 +1,13 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { WS_EVENTS_V2 } from '@web-radio/shared'
 import { ListenOnlyPlayerCard } from '@/components/station/listen-only-player-card'
 import { useAudioStore } from '@/stores/audio.store'
 import { useStationStore } from '@/stores/station.store'
 import { fetchStationStreamInfo } from '@/lib/api'
+import { getSocket } from '@/lib/socket'
+import { useDirectPlaybackEngine } from '@/hooks/useDirectPlaybackEngine'
 import {
   getEstimatedServerPosition,
   getServerOffsetMs,
@@ -12,15 +15,13 @@ import {
   useRadioPlaybackEngine,
 } from '@/hooks/useRadioPlaybackEngine'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api'
-const POLL_INTERVAL_MS = 4000
-
 interface PublicListenState {
   code: string
   name: string
   listenerCount: number
   accessMode: 'PUBLIC' | 'PRIVATE'
   isPasswordProtected: boolean
+  playbackMode?: 'DIRECT' | 'BROADCAST'
   currentTrackId: string | null
   currentTrack?: {
     id: string
@@ -49,12 +50,42 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   const serverOffsetMsRef = useRef<number | null>(getServerOffsetMs(initialState.serverTime))
   const volume = useAudioStore((s) => s.volume)
   const setAudioConnection = useStationStore((s) => s.setAudioConnection)
+  const socket = getSocket()
+  const isDirectMode = (state.playbackMode ?? 'BROADCAST') === 'DIRECT'
 
-  const playback = useRadioPlaybackEngine({
-    streamUrl: state.streamUrl ?? null,
-    isPlaying: !!state.currentTrackId && !state.isPaused,
+  const broadcastPlayback = useRadioPlaybackEngine({
+    streamUrl: isDirectMode ? null : state.streamUrl ?? null,
+    isPlaying: !isDirectMode && !!state.currentTrackId && !state.isPaused,
     volume,
   })
+
+  const directPlayback = useDirectPlaybackEngine({
+    trackId: isDirectMode ? state.currentTrackId : null,
+    trackStartedAt: isDirectMode ? normalizeTrackStartedAt(state.trackStartedAt) : null,
+    currentPosition: state.currentPosition ?? 0,
+    isPaused: !!state.isPaused,
+    trackDuration: state.currentTrack?.duration ?? 0,
+    volume,
+  })
+
+  const playback = isDirectMode ? directPlayback : broadcastPlayback
+  const effectiveTrackDuration = useMemo(() => {
+    const metadataDuration = state.currentTrack?.duration ?? 0
+    if (!isDirectMode) return metadataDuration
+
+    const detectedDuration = directPlayback.mediaDuration
+    if (typeof detectedDuration !== 'number' || !Number.isFinite(detectedDuration) || detectedDuration <= 0) {
+      return metadataDuration
+    }
+
+    return detectedDuration
+  }, [directPlayback.mediaDuration, isDirectMode, state.currentTrack?.duration])
+  const stateRef = useRef(state)
+  const playbackRef = useRef(playback)
+  const isDirectModeRef = useRef(isDirectMode)
+  stateRef.current = state
+  playbackRef.current = playback
+  isDirectModeRef.current = isDirectMode
 
   useEffect(() => {
     setAudioConnection({
@@ -94,93 +125,241 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       if (typeof document !== 'undefined') {
         document.title = 'PINE'
       }
-      setAudioConnection({
-        state: 'idle',
-        message: null,
-        diagnostics: null,
-      })
+      setAudioConnection({ state: 'idle', message: null, diagnostics: null })
     }
   }, [setAudioConnection])
 
+  // Tick position forward locally
   useEffect(() => {
     const timer = window.setInterval(() => {
-      setState((prev) => ({
-        ...prev,
-        currentPosition: getEstimatedServerPosition({
+      setState((prev) => {
+        if (!prev.currentTrackId || !prev.currentTrack) return prev
+
+        if (isDirectModeRef.current) {
+          const directAudio = playbackRef.current.audioRef.current
+          if (
+            prev.isPaused ||
+            !directAudio ||
+            directAudio.paused ||
+            directAudio.readyState < 1
+          ) {
+            return prev
+          }
+
+          const currentPosition = Math.min(
+            prev.currentTrack.duration > 0 ? prev.currentTrack.duration : Number.POSITIVE_INFINITY,
+            Math.max(0, directAudio.currentTime),
+          )
+
+          if (Math.abs((prev.currentPosition ?? 0) - currentPosition) < 0.05) {
+            return prev
+          }
+
+          return {
+            ...prev,
+            currentPosition,
+          }
+        }
+
+        const currentPosition = getEstimatedServerPosition({
           currentPosition: prev.currentPosition ?? 0,
           duration: prev.currentTrack?.duration ?? 0,
           isPaused: !!prev.isPaused,
           pausedPosition: prev.pausedPosition,
           serverOffsetMs: serverOffsetMsRef.current,
           trackStartedAt: normalizeTrackStartedAt(prev.trackStartedAt),
-        }),
-      }))
+        })
+
+        if (Math.abs((prev.currentPosition ?? 0) - currentPosition) < 0.05) {
+          return prev
+        }
+
+        return {
+          ...prev,
+          currentPosition,
+        }
+      })
     }, 250)
     return () => window.clearInterval(timer)
   }, [])
 
+  // WebSocket connection
   useEffect(() => {
     let cancelled = false
 
-    const pullState = async () => {
-      try {
-        const [stationResponse, streamInfo] = await Promise.all([
-          fetch(`${API_URL}/stations/${code}`, { cache: 'no-store' }),
-          fetchStationStreamInfo(code),
-        ])
-        if (!stationResponse.ok) return
-        const next = (await stationResponse.json()) as PublicListenState
-        if (cancelled) return
-        if (next.accessMode !== 'PUBLIC' || next.isPasswordProtected) return
-
-        const offsetMs = getServerOffsetMs(next.serverTime, Date.now())
-        if (offsetMs !== null) {
-          serverOffsetMsRef.current = offsetMs
-        }
-
-        const nextPosition = getEstimatedServerPosition({
-          currentPosition: next.currentPosition ?? 0,
-          duration: next.currentTrack?.duration ?? 0,
-          isPaused: !!next.isPaused,
-          pausedPosition: next.pausedPosition,
-          serverOffsetMs: serverOffsetMsRef.current,
-          trackStartedAt: normalizeTrackStartedAt(next.trackStartedAt),
-        })
-
-        setState((prev) => ({
-          ...prev,
-          name: next.name ?? prev.name,
-          listenerCount: next.listenerCount ?? prev.listenerCount,
-          currentTrackId: next.currentTrackId ?? null,
-          currentTrack: next.currentTrack ?? null,
-          currentPosition: nextPosition,
-          isPaused: next.isPaused ?? false,
-          trackStartedAt: next.trackStartedAt ?? null,
-          pausedPosition: next.pausedPosition ?? 0,
-          serverTime: next.serverTime ?? prev.serverTime ?? null,
-          streamUrl: streamInfo?.streamUrl ?? null,
-        }))
-
-        playback.reportDrift({
-          targetPosition: nextPosition,
-          actualPosition: playback.audioRef.current?.currentTime ?? null,
-          syncType: 'poll',
-          rttMs: null,
-        })
-      } catch {
-        // keep previous state on transient network errors
-      }
+    const refreshStreamUrl = async () => {
+      if (isDirectModeRef.current) return
+      const info = await fetchStationStreamInfo(code).catch(() => null)
+      if (cancelled || !info?.streamUrl) return
+      setState((prev) => ({ ...prev, streamUrl: info.streamUrl }))
     }
 
-    void pullState()
-    const intervalId = window.setInterval(() => {
-      void pullState()
-    }, POLL_INTERVAL_MS)
+    socket.connect()
+    socket.emit(WS_EVENTS_V2.STATION_JOIN, { code })
+
+    void refreshStreamUrl()
+
+    const handleStationState = (data: any) => {
+      if (cancelled) return
+      const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
+      const offsetMs = getServerOffsetMs(data.station?.serverTime ?? data.serverTime, Date.now())
+      if (offsetMs !== null) serverOffsetMsRef.current = offsetMs
+      const nextPlaybackMode = data.station?.playbackMode ?? stateRef.current.playbackMode ?? 'BROADCAST'
+      const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
+
+      const targetPosition = getEstimatedServerPosition({
+        currentPosition: data.currentPosition ?? 0,
+        duration: data.currentTrack?.duration ?? 0,
+        isPaused: !!data.isPaused,
+        pausedPosition: 0,
+        serverOffsetMs: serverOffsetMsRef.current,
+        trackStartedAt: startedAt,
+      })
+      const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
+      const directActualPosition =
+        directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
+      const position =
+        nextIsDirectMode &&
+        !data.isPaused &&
+        directActualPosition !== null &&
+        playbackRef.current.audioConnectionState === 'playing'
+          ? Math.max(targetPosition, directActualPosition)
+          : targetPosition
+
+      setState((prev) => ({
+        ...prev,
+        name: data.station?.name ?? prev.name,
+        listenerCount: data.station?.listenerCount ?? prev.listenerCount,
+        playbackMode: nextPlaybackMode,
+        currentTrackId: data.currentTrack?.id ?? null,
+        currentTrack: data.currentTrack ?? null,
+        currentPosition: position,
+        isPaused: data.isPaused ?? false,
+        trackStartedAt: data.trackStartedAt ?? null,
+      }))
+    }
+    socket.on(WS_EVENTS_V2.STATION_STATE, handleStationState)
+
+    const handleTrackChanged = (data: any) => {
+      if (cancelled) return
+      const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
+      const nextPlaybackMode = stateRef.current.playbackMode ?? 'BROADCAST'
+      const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
+      const targetPosition = getEstimatedServerPosition({
+        currentPosition: 0,
+        duration: data.track?.duration ?? 0,
+        isPaused: !!data.isPaused,
+        pausedPosition: 0,
+        serverOffsetMs: serverOffsetMsRef.current,
+        trackStartedAt: startedAt,
+      })
+      const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
+      const directActualPosition =
+        directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
+      const position =
+        nextIsDirectMode &&
+        !data.isPaused &&
+        directActualPosition !== null &&
+        playbackRef.current.audioConnectionState === 'playing'
+          ? Math.max(targetPosition, directActualPosition)
+          : targetPosition
+
+      setState((prev) => ({
+        ...prev,
+        currentTrackId: data.track?.id ?? null,
+        currentTrack: data.track ?? null,
+        currentPosition: position,
+        isPaused: data.isPaused ?? false,
+        trackStartedAt: data.trackStartedAt ?? null,
+      }))
+
+      if (!nextIsDirectMode && data.track?.id) {
+        void playbackRef.current.restartAudio()
+      }
+    }
+    socket.on(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)
+
+    const handlePlaybackSync = (data: any) => {
+      if (cancelled) return
+      const currentState = stateRef.current
+      const startedAt = normalizeTrackStartedAt(data.trackStartedAt) ?? normalizeTrackStartedAt(currentState.trackStartedAt)
+      const nextIsPaused = data.isPaused ?? currentState.isPaused ?? false
+      const currentDuration =
+        typeof data.currentTrackDuration === 'number' && Number.isFinite(data.currentTrackDuration)
+          ? Math.max(0, data.currentTrackDuration)
+          : currentState.currentTrack?.duration ?? 0
+      const reportedPosition =
+        typeof data.position === 'number' && Number.isFinite(data.position)
+          ? Math.max(0, data.position)
+          : typeof data.currentPosition === 'number' && Number.isFinite(data.currentPosition)
+            ? Math.max(0, data.currentPosition)
+            : currentState.currentPosition ?? 0
+      const targetPosition = getEstimatedServerPosition({
+        currentPosition: reportedPosition,
+        duration: currentDuration,
+        isPaused: nextIsPaused,
+        pausedPosition: reportedPosition,
+        serverOffsetMs: serverOffsetMsRef.current,
+        trackStartedAt: startedAt,
+      })
+      const nextIsDirectMode = (currentState.playbackMode ?? 'BROADCAST') === 'DIRECT'
+      const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
+      const directActualPosition =
+        directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
+      const commandType = typeof data.commandType === 'string' ? data.commandType : null
+      const position =
+        nextIsDirectMode &&
+        !nextIsPaused &&
+        commandType !== 'SEEK' &&
+        directActualPosition !== null &&
+        playbackRef.current.audioConnectionState === 'playing'
+          ? Math.max(targetPosition, directActualPosition)
+          : targetPosition
+
+      setState((prev) => ({
+        ...prev,
+        currentPosition: position,
+        isPaused: nextIsPaused,
+        trackStartedAt: data.trackStartedAt ?? prev.trackStartedAt ?? null,
+      }))
+
+      playbackRef.current.reportDrift({
+        targetPosition: position,
+        actualPosition: directActualPosition ?? playbackRef.current.audioRef.current?.currentTime ?? null,
+        syncType: commandType ? `command:${commandType.toLowerCase()}` : 'ws-sync',
+        rttMs: null,
+      })
+    }
+    socket.on(WS_EVENTS_V2.PLAYBACK_SYNC, handlePlaybackSync)
+
+    const handleListenerJoined = (data: any) => {
+      if (cancelled || typeof data?.listenerCount !== 'number') return
+      setState((prev) => ({ ...prev, listenerCount: data.listenerCount }))
+    }
+    socket.on(WS_EVENTS_V2.LISTENER_JOINED, handleListenerJoined)
+
+    const handleListenerLeft = (data: any) => {
+      if (cancelled || typeof data?.listenerCount !== 'number') return
+      setState((prev) => ({ ...prev, listenerCount: data.listenerCount }))
+    }
+    socket.on(WS_EVENTS_V2.LISTENER_LEFT, handleListenerLeft)
+
+    const heartbeat = window.setInterval(() => {
+      socket.emit(WS_EVENTS_V2.HEARTBEAT)
+    }, 30_000)
 
     return () => {
       cancelled = true
-      window.clearInterval(intervalId)
+      socket.emit(WS_EVENTS_V2.STATION_LEAVE)
+      socket.off(WS_EVENTS_V2.STATION_STATE, handleStationState)
+      socket.off(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)
+      socket.off(WS_EVENTS_V2.PLAYBACK_SYNC, handlePlaybackSync)
+      socket.off(WS_EVENTS_V2.LISTENER_JOINED, handleListenerJoined)
+      socket.off(WS_EVENTS_V2.LISTENER_LEFT, handleListenerLeft)
+      socket.disconnect()
+      window.clearInterval(heartbeat)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code])
 
   if (!state.currentTrackId || !state.currentTrack) {
@@ -192,6 +371,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       <ListenOnlyPlayerCard
         track={state.currentTrack}
         currentPosition={state.currentPosition ?? 0}
+        displayDuration={effectiveTrackDuration}
         isPaused={!!state.isPaused}
         isPlaying={!state.isPaused}
         listenerCount={state.listenerCount ?? 0}

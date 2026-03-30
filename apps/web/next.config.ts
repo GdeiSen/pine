@@ -1,5 +1,6 @@
 import type { NextConfig } from 'next'
 
+const backendProxyTarget = process.env.BACKEND_PROXY_TARGET ?? 'http://localhost:3001'
 const streamProxyTarget = process.env.NEXT_PUBLIC_STREAM_PROXY_TARGET ?? 'http://icecast:8000'
 
 const nextConfig: NextConfig = {
@@ -11,6 +12,10 @@ const nextConfig: NextConfig = {
   },
   async rewrites() {
     return [
+      {
+        source: '/api/:path*',
+        destination: `${backendProxyTarget}/api/:path*`,
+      },
       {
         source: '/live.mp3',
         destination: `${streamProxyTarget}/live.mp3`,

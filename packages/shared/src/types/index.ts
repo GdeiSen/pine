@@ -60,6 +60,11 @@ export enum SystemQueueMode {
   SMART_SHUFFLE = 'SMART_SHUFFLE',
 }
 
+export enum StationPlaybackMode {
+  DIRECT = 'DIRECT',
+  BROADCAST = 'BROADCAST',
+}
+
 export enum PlaybackCommandType {
   PLAY = 'PLAY',
   PAUSE = 'PAUSE',
@@ -166,6 +171,7 @@ export interface Station {
   currentPosition: number
   crossfadeDuration: number
   streamQuality: StreamQuality
+  playbackMode: StationPlaybackMode
   activePlaylistId: string | null
   listenerCount: number
   createdAt: string

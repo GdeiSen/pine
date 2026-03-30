@@ -30,6 +30,8 @@ interface CurrentTrack {
   duration: number
   hasCover: boolean
   quality: string
+  filename?: string | null
+  bitrate?: number | null
   uploadedBy: { id: string; username: string; avatar: string | null }
 }
 
@@ -45,6 +47,7 @@ interface StationInfo {
   isPasswordProtected: boolean
   crossfadeDuration: number
   streamQuality: 'LOW' | 'MEDIUM' | 'HIGH'
+  playbackMode: 'DIRECT' | 'BROADCAST'
   activePlaylistId: string | null
   listenerCount: number
 }

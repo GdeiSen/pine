@@ -1,61 +1,59 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { Volume2, VolumeX } from "lucide-react";
+import { useMemo, useState } from "react";
+import { motion } from "framer-motion";
+import { Volume1, Volume2, VolumeX } from "lucide-react";
 import { useAudioStore } from "@/stores/audio.store";
 import { Button } from "@/components/ui/button";
 
+const VOLUME_STEP_PERCENT = 25;
+
 export function HeaderVolumeControl() {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [isHovering, setIsHovering] = useState(false);
   const volume = useAudioStore((s) => s.volume);
   const setVolume = useAudioStore((s) => s.setVolume);
+  const volumePercent = Math.round(volume * 100);
 
-  useEffect(() => {
-    const onDocClick = (event: MouseEvent) => {
-      if (!rootRef.current) return;
-      if (!rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
-  }, []);
+  const VolumeIcon = useMemo(() => {
+    if (volumePercent <= 0) return VolumeX;
+    if (volumePercent <= 34) return Volume1;
+    return Volume2;
+  }, [volumePercent]);
+
+  const handleVolumeStep = () => {
+    const stepped = Math.round(volumePercent / VOLUME_STEP_PERCENT) * VOLUME_STEP_PERCENT;
+    const next = stepped >= 100 ? 0 : stepped + VOLUME_STEP_PERCENT;
+    setVolume(next / 100);
+  };
 
   return (
-    <div className="relative" ref={rootRef}>
+    <div
+      className="relative flex items-center"
+      onMouseEnter={() => setIsHovering(true)}
+      onMouseLeave={() => setIsHovering(false)}
+    >
+      <motion.span
+        key={volumePercent}
+        initial={false}
+        animate={{
+          width: isHovering ? 42 : 0,
+          opacity: isHovering ? 1 : 0,
+          marginRight: isHovering ? 4 : 0,
+        }}
+        transition={{ duration: 0.16, ease: "easeOut" }}
+        className="inline-block overflow-hidden whitespace-nowrap text-right text-[11px] tabular-nums text-[--text-secondary]"
+      >
+        {volumePercent}%
+      </motion.span>
+
       <Button
         variant="ghost"
         size="icon-sm"
-        onClick={() => setOpen((v) => !v)}
-        aria-label="Volume"
+        onClick={handleVolumeStep}
+        aria-label={`Volume ${volumePercent}%`}
       >
-        {volume <= 0.001 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+        <VolumeIcon size={14} />
       </Button>
-
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ width: 0, opacity: 0, x: 8 }}
-            animate={{ width: 164, opacity: 1, x: 0 }}
-            exit={{ width: 0, opacity: 0, x: 8 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            className="absolute right-full top-1/2 -translate-y-1/2 h-8 overflow-hidden flex items-center"
-          >
-            <input
-              type="range"
-              min={0}
-              max={100}
-              step={1}
-              value={Math.round(volume * 100)}
-              onChange={(event) => setVolume(Number(event.target.value) / 100)}
-              className="header-volume-slider w-[148px] bg-transparent"
-              style={{ accentColor: "#E8440F" }}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }

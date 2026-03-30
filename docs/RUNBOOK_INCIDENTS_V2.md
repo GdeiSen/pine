@@ -9,8 +9,8 @@ This runbook covers the most common production incidents for the v2 stack:
 - `icecast`
 - `liquidsoap`
 - `api`
-- `worker-playout`
-- `worker-transcode`
+- `playback-worker`
+- `media-worker`
 - `web`
 - `nginx`
 
@@ -39,10 +39,10 @@ $COMPOSE logs --tail=200 icecast
 $COMPOSE logs --tail=200 liquidsoap
 ```
 
-3. Check playout worker heartbeat / command processing:
+3. Check playback worker heartbeat / command processing:
 
 ```bash
-$COMPOSE logs --tail=200 worker-playout
+$COMPOSE logs --tail=200 playback-worker
 ```
 
 4. Validate stream endpoint directly:
@@ -54,7 +54,7 @@ curl -I http://localhost/live.mp3
 If `5xx` or timeout appears, restart audio pipeline:
 
 ```bash
-$COMPOSE restart liquidsoap icecast worker-playout
+$COMPOSE restart liquidsoap icecast playback-worker
 ```
 
 ## 2) Track stream returns 404 / missing media
@@ -87,10 +87,10 @@ $COMPOSE run --rm minio-init
 
 ## 3) Queue commands are delayed or stuck
 
-1. Inspect API + playout logs:
+1. Inspect API + playback worker logs:
 
 ```bash
-$COMPOSE logs --tail=200 api worker-playout
+$COMPOSE logs --tail=200 api playback-worker
 ```
 
 2. Validate DB connectivity from API:
@@ -102,7 +102,7 @@ $COMPOSE exec api sh -lc 'pnpm exec prisma migrate status'
 3. Restart queue path safely:
 
 ```bash
-$COMPOSE restart api worker-playout
+$COMPOSE restart api playback-worker
 ```
 
 4. If still stuck, check DB locks / long queries (PostgreSQL):
@@ -113,22 +113,22 @@ $COMPOSE exec postgres sh -lc 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SE
 
 ## 4) Uploads fail or covers/transcodes are missing
 
-1. Check API and transcode worker:
+1. Check API and media worker:
 
 ```bash
-$COMPOSE logs --tail=250 api worker-transcode
+$COMPOSE logs --tail=250 api media-worker
 ```
 
 2. Confirm worker container has expected env:
 
 ```bash
-$COMPOSE exec worker-transcode sh -lc 'env | grep -E "MINIO_|DATABASE_URL|NODE_ENV"'
+$COMPOSE exec media-worker sh -lc 'env | grep -E "MINIO_|DATABASE_URL|NODE_ENV"'
 ```
 
-3. Restart transcode worker:
+3. Restart media worker:
 
 ```bash
-$COMPOSE restart worker-transcode
+$COMPOSE restart media-worker
 ```
 
 ## 5) API is up but web is stale / socket not updating
@@ -179,7 +179,7 @@ $COMPOSE down
 $COMPOSE up -d postgres minio
 $COMPOSE up -d minio-init
 $COMPOSE up -d icecast liquidsoap
-$COMPOSE up -d api worker-playout worker-transcode
+$COMPOSE up -d api playback-worker media-worker
 $COMPOSE up -d web nginx
 $COMPOSE ps
 ```
@@ -201,7 +201,7 @@ $COMPOSE up -d --build
 1. Save logs for affected interval:
 
 ```bash
-$COMPOSE logs --since 30m api web worker-playout worker-transcode icecast liquidsoap minio postgres nginx > /tmp/pine-incident.log
+$COMPOSE logs --since 30m api web playback-worker media-worker icecast liquidsoap minio postgres nginx > /tmp/pine-incident.log
 ```
 
 2. Document:

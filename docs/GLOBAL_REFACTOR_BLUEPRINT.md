@@ -230,7 +230,7 @@ Then perform all queue mutations atomically.
 
 ## 10.1 Authority
 
-- Only playout worker can advance tracks and change canonical playback state.
+- Only playback worker can advance tracks and change canonical playback state.
 - API writes commands; worker decides and commits transitions.
 
 ## 10.2 Removed behavior
@@ -355,7 +355,7 @@ Each event includes:
 
 ## 15.1 Logs
 
-- Structured JSON logs (API + workers + playout)
+- Structured JSON logs (API + workers + playback)
 - Mandatory fields: `service`, `stationId`, `commandId`, `eventId`, `traceId`
 
 ## 15.2 Metrics
@@ -368,7 +368,7 @@ Each event includes:
 
 ## 15.3 Alerts
 
-1. No playout heartbeat > 10s
+1. No playback heartbeat > 10s
 2. Queue lock contention spikes
 3. Transcode backlog above threshold
 4. Icecast mount unavailable
@@ -385,8 +385,8 @@ Services:
 4. `liquidsoap`
 5. `api`
 6. `web`
-7. `worker-transcode`
-8. `worker-playout`
+7. `media-worker`
+8. `playback-worker`
 9. `nginx` (reverse proxy / TLS termination)
 
 Nginx routes:
@@ -443,8 +443,8 @@ Nginx routes:
 | `apps/server/src/modules/jobs/jobs.module.ts` | queue/worker wiring |
 | `apps/server/src/modules/jobs/transcode.producer.ts` | transcode job enqueue |
 | `apps/server/src/modules/jobs/cover.producer.ts` | cover extraction job enqueue |
-| `apps/worker-playout/*` | playout worker app |
-| `apps/worker-transcode/*` | transcode worker app |
+| `apps/playback-worker/*` | playback worker app |
+| `apps/media-worker/*` | media worker app |
 | `infra/docker-compose.yml` | local/prod-like orchestration |
 | `infra/icecast/icecast.xml` | icecast config |
 | `infra/liquidsoap/radio.liq` | liquidsoap script |
@@ -574,8 +574,8 @@ Refactor is complete when:
 
 ## 24.3 Workers and media
 
-- [x] Build transcode worker
-- [x] Build playout worker
+- [x] Build media worker
+- [x] Build playback worker
 - [x] Integrate MinIO object keys and asset lifecycle
 - [x] Integrate Liquidsoap source control
 - [x] Integrate Icecast mount publishing
@@ -603,7 +603,7 @@ Refactor is complete when:
 2. `queue transaction correctness`
 3. `playback command/event pipeline`
 4. `MinIO track assets`
-5. `workers (transcode/playout)`
+5. `workers (media/playback)`
 6. `Icecast + Liquidsoap wiring`
 7. `web unified player`
 8. `observability + load testing`

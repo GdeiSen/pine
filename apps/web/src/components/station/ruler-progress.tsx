@@ -19,6 +19,18 @@ const MAX_VEL      = 120     // max seconds-per-second while dragging
 const BASE_ACCEL   = 0.18    // base acceleration
 const FAR_BOOST_AT = 220     // px from origin where extra acceleration starts
 const FAR_ACCEL    = 0.32    // additional acceleration when cursor is far away
+const TOGGLE_GUARD_WINDOW_MS = 1400
+const TOGGLE_JUMP_CLAMP_S = 1.4
+const PLAY_GUARD_AHEAD_MARGIN_S = 0.45
+const SMOOTH_SNAP_THRESHOLD_S = 12
+const SMOOTH_EPSILON_S = 0.008
+const PLAY_FORWARD_BASE_SPS = 1.0
+const PLAY_FORWARD_GAIN = 1.45
+const PLAY_FORWARD_MAX_SPS = 3.6
+const PLAY_BACKWARD_BASE_SPS = 0.12
+const PLAY_BACKWARD_GAIN = 1.8
+const PLAY_BACKWARD_MAX_SPS = 2.8
+const PAUSED_FOLLOW_SPS = 2.8
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmtTime(sec: number): string {
@@ -38,11 +50,38 @@ function mixRgba(from: Rgba, to: Rgba, t: number): string {
   return `rgba(${r},${g},${b},${a.toFixed(3)})`
 }
 
+function clampPosition(position: number, duration: number): number {
+  const normalized = Math.max(0, position)
+  return duration > 0 ? Math.min(normalized, duration) : normalized
+}
+
+function truncateToWidth(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return ''
+  if (ctx.measureText(text).width <= maxWidth) return text
+  const ellipsis = '…'
+  if (ctx.measureText(ellipsis).width > maxWidth) return ''
+
+  let lo = 0
+  let hi = text.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    const candidate = `${text.slice(0, mid)}${ellipsis}`
+    if (ctx.measureText(candidate).width <= maxWidth) {
+      lo = mid
+    } else {
+      hi = mid - 1
+    }
+  }
+  return `${text.slice(0, lo)}${ellipsis}`
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 interface RulerProgressBarProps {
   currentPosition: number
   isPaused: boolean
   duration: number
+  leftMeta?: string | null
+  nextTrackHint?: string | null
   onSeek: (pos: number) => void
   interactive?: boolean
 }
@@ -51,6 +90,8 @@ export function RulerProgressBar({
   currentPosition,
   isPaused,
   duration,
+  leftMeta = null,
+  nextTrackHint = null,
   onSeek,
   interactive = true,
 }: RulerProgressBarProps) {
@@ -67,7 +108,16 @@ export function RulerProgressBar({
   const propsRef     = useRef({ currentPosition, isPaused, duration, onSeek })
   const dprRef       = useRef(1)
   const audioCtxRef  = useRef<AudioContext | null>(null)
+  const toggleGuardRef = useRef<{
+    mode: 'pause' | 'play'
+    startPos: number
+    startTime: number
+    activeUntil: number
+  } | null>(null)
   const rightTimeRef = useRef<HTMLDivElement | null>(null)
+  const leftTimeRef  = useRef<HTMLDivElement | null>(null)
+  const leftMetaRef  = useRef<string | null>(leftMeta)
+  const nextTrackHintRef = useRef<string | null>(nextTrackHint)
 
   const ensureAudioCtx = useCallback(() => {
     if (typeof window === 'undefined') return null
@@ -117,12 +167,63 @@ export function RulerProgressBar({
 
   // Keep props ref in sync
   useEffect(() => { propsRef.current = { currentPosition, isPaused, duration, onSeek } })
+  useEffect(() => { leftMetaRef.current = leftMeta })
+  useEffect(() => { nextTrackHintRef.current = nextTrackHint })
 
   // Sync playback position from parent
   useEffect(() => {
     if (!dragging.current) {
-      syncRef.current = { pos: currentPosition, time: performance.now(), paused: isPaused }
-      seekPos.current = currentPosition
+      const now = performance.now()
+      const prev = syncRef.current
+      const visualPos = smoothRef.current
+      let nextPos = currentPosition
+      const pausedChanged = prev.paused !== isPaused
+
+      if (pausedChanged) {
+        const deltaFromVisual = nextPos - visualPos
+        if (isPaused) {
+          if (Math.abs(deltaFromVisual) <= TOGGLE_JUMP_CLAMP_S) {
+            nextPos = visualPos
+          }
+        } else {
+          if (Math.abs(deltaFromVisual) <= TOGGLE_JUMP_CLAMP_S) {
+            nextPos = visualPos
+          }
+        }
+        toggleGuardRef.current = {
+          mode: isPaused ? 'pause' : 'play',
+          startPos: visualPos,
+          startTime: now,
+          activeUntil: now + TOGGLE_GUARD_WINDOW_MS,
+        }
+      } else {
+        const guard = toggleGuardRef.current
+        if (guard && now <= guard.activeUntil) {
+          if (guard.mode === 'pause' && isPaused) {
+            const rollback = guard.startPos - nextPos
+            if (rollback > 0 && rollback <= TOGGLE_JUMP_CLAMP_S) {
+              nextPos = guard.startPos
+            }
+          } else if (guard.mode === 'play' && !isPaused) {
+            const elapsed = Math.max(0, (now - guard.startTime) / 1000)
+            const maxExpected = guard.startPos + elapsed + PLAY_GUARD_AHEAD_MARGIN_S
+            const forwardJump = nextPos - maxExpected
+            const backwardJump = guard.startPos - nextPos
+            if (forwardJump > 0 && forwardJump <= TOGGLE_JUMP_CLAMP_S) {
+              nextPos = maxExpected
+            } else if (backwardJump > 0 && backwardJump <= TOGGLE_JUMP_CLAMP_S) {
+              nextPos = guard.startPos
+            }
+          } else {
+            toggleGuardRef.current = null
+          }
+        } else if (guard && now > guard.activeUntil) {
+          toggleGuardRef.current = null
+        }
+      }
+
+      syncRef.current = { pos: nextPos, time: now, paused: isPaused }
+      seekPos.current = nextPos
     } else {
       syncRef.current.paused = isPaused
     }
@@ -186,7 +287,7 @@ export function RulerProgressBar({
     for (let i = subFirst; i <= subLast; i++) {
       const t = i * SUB_TICK_STEP_SEC
       if (t < 0) continue
-      if (duration > 0 && t > duration + 2) continue
+      if (duration > 0 && t > duration) continue
       if (Math.abs(t - Math.round(t)) < 1e-6) continue
 
       const x = indicatorX + (t - pos) * PX_PER_SEC
@@ -199,7 +300,7 @@ export function RulerProgressBar({
 
     for (let t = first; t <= last; t++) {
       if (t < 0) continue
-      if (duration > 0 && t > duration + 2) continue
+      if (duration > 0 && t > duration) continue
 
       const x     = indicatorX + (t - pos) * PX_PER_SEC
       const major = t % 5 === 0
@@ -218,6 +319,33 @@ export function RulerProgressBar({
         ctx.fillStyle = mixRgba(labelBase, focusLabel, glow)
         ctx.textAlign = 'left'
         ctx.fillText(fmtTime(t), x + LABEL_OFFSET, LABEL_BASELINE_Y)
+      }
+    }
+
+    const nextHint = nextTrackHintRef.current?.trim()
+    if (duration > 0 && nextHint) {
+      const endX = indicatorX + (duration - pos) * PX_PER_SEC
+      if (Number.isFinite(endX) && endX > -220 && endX < W + 220) {
+        const dist = Math.abs(endX - indicatorX)
+        const glow = Math.max(0, 1 - dist / HIGHLIGHT_RADIUS_PX)
+        const endLabelColor = mixRgba(labelBase, focusLabel, Math.min(1, glow * 0.85 + 0.2))
+
+        ctx.fillStyle = mixRgba(tickMinorBase, focusMinor, Math.min(1, glow * 0.75 + 0.2))
+        ctx.fillRect(Math.round(endX) - 0.5, 0, 1, TICK_MAJOR_H)
+
+        const labelX = endX + LABEL_OFFSET + 2
+        if (labelX < W - 4) {
+          const maxWidth = Math.max(0, W - labelX - 4)
+          if (maxWidth > 18) {
+            ctx.font = '600 10px ui-monospace, "SF Mono", monospace'
+            ctx.textAlign = 'left'
+            ctx.fillStyle = endLabelColor
+            const label = truncateToWidth(ctx, `→ ${nextHint}`, maxWidth)
+            if (label) {
+              ctx.fillText(label, labelX, LABEL_BASELINE_Y)
+            }
+          }
+        }
       }
     }
 
@@ -246,6 +374,10 @@ export function RulerProgressBar({
       }
     } else if (rightTimeRef.current) {
       rightTimeRef.current.textContent = ''
+    }
+
+    if (leftTimeRef.current) {
+      leftTimeRef.current.textContent = leftMetaRef.current?.trim() ?? ''
     }
   }, [])
 
@@ -279,14 +411,36 @@ export function RulerProgressBar({
           playScrubClicks(crossedSeconds)
         }
       } else {
-        // Smooth forward interpolation from last server sync
+        // Follow server-synced target with limited correction velocity to avoid visible jumps.
         const { pos, time, paused } = syncRef.current
-        if (paused) {
-          smoothRef.current = pos
+        const duration = propsRef.current.duration
+        const target = clampPosition(
+          paused ? pos : pos + Math.max(0, (now - time) / 1000),
+          duration,
+        )
+        const visual = smoothRef.current
+        const diff = target - visual
+
+        if (Math.abs(diff) >= SMOOTH_SNAP_THRESHOLD_S || Math.abs(diff) <= SMOOTH_EPSILON_S) {
+          smoothRef.current = target
+        } else if (paused) {
+          const maxStep = PAUSED_FOLLOW_SPS * dt
+          const step = Math.sign(diff) * Math.min(Math.abs(diff), maxStep)
+          smoothRef.current = clampPosition(visual + step, duration)
         } else {
-          const elapsed = (now - time) / 1000
-          const d = propsRef.current.duration
-          smoothRef.current = d > 0 ? Math.min(pos + elapsed, d) : pos + elapsed
+          const forwardDelta = Math.max(0, diff)
+          const backwardDelta = Math.max(0, -diff)
+          const forwardSpeed = Math.min(
+            PLAY_FORWARD_MAX_SPS,
+            PLAY_FORWARD_BASE_SPS + forwardDelta * PLAY_FORWARD_GAIN,
+          )
+          const backwardSpeed = Math.min(
+            PLAY_BACKWARD_MAX_SPS,
+            PLAY_BACKWARD_BASE_SPS + backwardDelta * PLAY_BACKWARD_GAIN,
+          )
+          const maxStep = diff >= 0 ? forwardSpeed * dt : backwardSpeed * dt
+          const step = Math.sign(diff) * Math.min(Math.abs(diff), maxStep)
+          smoothRef.current = clampPosition(visual + step, duration)
         }
       }
 
@@ -370,6 +524,14 @@ export function RulerProgressBar({
       <div
         className="pointer-events-none absolute inset-y-0 right-0 w-16"
         style={{ background: 'linear-gradient(270deg, var(--bg-elevated) 0%, rgba(0,0,0,0) 100%)' }}
+      />
+      <div
+        ref={leftTimeRef}
+        className="pointer-events-none absolute left-0 bottom-[3px] z-20 text-[10px] font-bold tabular-nums truncate max-w-[45%]"
+        style={{
+          color: 'var(--text-muted)',
+          fontFamily: 'ui-monospace, "SF Mono", monospace',
+        }}
       />
       <div
         ref={rightTimeRef}

@@ -18,6 +18,13 @@ interface StationListItem {
   isPaused?: boolean;
 }
 
+interface DiveTransitionState {
+  stationCode: string;
+  stationName: string;
+  originX: number;
+  originY: number;
+}
+
 function hashString(value: string): number {
   let h = 2166136261;
   for (let i = 0; i < value.length; i++) {
@@ -41,6 +48,8 @@ const MAX_MAP_STATIONS = 10;
 const MAX_OWN_STATIONS = 5;
 const ACTIVE_MARKER_COLOR = "#E8440F";
 const INACTIVE_MARKER_COLOR = "#FFFFFF";
+const STATION_DIVE_NAV_DELAY_MS = 780;
+const STATION_DIVE_FAILSAFE_MS = 4000;
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -52,7 +61,9 @@ export default function DashboardPage() {
   const [newStationName, setNewStationName] = useState("");
   const [newStationDescription, setNewStationDescription] = useState("");
   const [createError, setCreateError] = useState("");
+  const [diveTransition, setDiveTransition] = useState<DiveTransitionState | null>(null);
   const mapAreaRef = useRef<HTMLDivElement | null>(null);
+  const diveTimeoutsRef = useRef<number[]>([]);
   const [mapArea, setMapArea] = useState({ width: 1280, height: 640 });
 
   useEffect(() => {
@@ -84,6 +95,15 @@ export default function DashboardPage() {
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", updateSize);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const timeoutId of diveTimeoutsRef.current) {
+        window.clearTimeout(timeoutId);
+      }
+      diveTimeoutsRef.current = [];
     };
   }, []);
 
@@ -246,14 +266,17 @@ export default function DashboardPage() {
   );
 
   const isLoading = loadingMy || loadingDiscover;
-  const canCreateStation = newStationName.trim().length >= 2;
+  const trimmedStationName = newStationName.trim();
+  const trimmedStationDescription = newStationDescription.trim();
+  const canCreateStation =
+    trimmedStationName.length === 0 || trimmedStationName.length >= 2;
 
   const createStationMutation = useMutation({
     mutationFn: () =>
       api
         .post("/stations", {
-          name: newStationName.trim(),
-          description: newStationDescription.trim() || undefined,
+          name: trimmedStationName || undefined,
+          description: trimmedStationDescription || undefined,
         })
         .then((r) => r.data as StationListItem),
     onSuccess: async (createdStation) => {
@@ -296,6 +319,40 @@ export default function DashboardPage() {
       return;
     }
 
+  };
+
+  const handleStationCardClick = (
+    station: StationListItem,
+    event: React.MouseEvent<HTMLButtonElement>,
+  ) => {
+    if (diveTransition) return;
+
+    const cardRect = event.currentTarget.getBoundingClientRect();
+    const originX = cardRect.left + cardRect.width / 2;
+    const originY = cardRect.top + cardRect.height / 2;
+
+    for (const timeoutId of diveTimeoutsRef.current) {
+      window.clearTimeout(timeoutId);
+    }
+    diveTimeoutsRef.current = [];
+
+    setDiveTransition({
+      stationCode: station.code,
+      stationName: station.name,
+      originX,
+      originY,
+    });
+
+    const navTimeoutId = window.setTimeout(() => {
+      router.push(`/station/${station.code}`);
+    }, STATION_DIVE_NAV_DELAY_MS);
+    diveTimeoutsRef.current.push(navTimeoutId);
+
+    const failsafeTimeoutId = window.setTimeout(() => {
+      setDiveTransition(null);
+      diveTimeoutsRef.current = [];
+    }, STATION_DIVE_FAILSAFE_MS);
+    diveTimeoutsRef.current.push(failsafeTimeoutId);
   };
 
   const handleCreateSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -382,26 +439,10 @@ export default function DashboardPage() {
         </div>
 
         <div className="relative z-20 flex-1 min-h-0 flex flex-col">
-          <div className="px-5 py-4">
-            <div className="w-full max-w-[900px] flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-              <Button
-                type="button"
-                className="h-11 px-4 w-full sm:w-auto sm:shrink-0"
-                onClick={() => {
-                  setCreateError("");
-                  setIsCreateModalOpen(true);
-                }}
-              >
-                <Plus size={14} />
-                New Station
-              </Button>
-            </div>
-          </div>
-
           <div ref={mapAreaRef} className="relative flex-1 min-h-0">
             <form
               onSubmit={handleSearchSubmit}
-              className="absolute z-30 left-4 bottom-4 w-[calc(100%-2rem)] sm:w-[420px] h-11 rounded-xl flex items-center gap-2 px-3 focus-within:outline-none focus-within:ring-0"
+              className="absolute z-30 left-4 right-16 bottom-4 sm:right-auto sm:w-[420px] h-11 rounded-xl flex items-center gap-2 px-3 focus-within:outline-none focus-within:ring-0"
               style={{
                 background: "var(--bg-elevated)",
                 border: "1px solid var(--border)",
@@ -419,6 +460,19 @@ export default function DashboardPage() {
               />
             </form>
 
+            <Button
+              type="button"
+              className="absolute z-30 right-4 bottom-4 h-11 w-11 sm:w-auto sm:px-4"
+              onClick={() => {
+                setCreateError("");
+                setIsCreateModalOpen(true);
+              }}
+              aria-label="Create new station"
+            >
+              <Plus size={14} />
+              <span className="hidden sm:inline">New Station</span>
+            </Button>
+
             {!isLoading && plottedStations.length > 0 && (
               <div className="absolute inset-0 z-10 pointer-events-none">
                 {plottedStations.map(({ station, x, y }, i) => (
@@ -428,7 +482,7 @@ export default function DashboardPage() {
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                     transition={{ duration: 0.2, delay: i * 0.02 }}
-                    onClick={() => router.push(`/station/${station.code}`)}
+                    onClick={(event) => handleStationCardClick(station, event)}
                     className="absolute pointer-events-auto group"
                     style={{
                       left: `${x}%`,
@@ -448,35 +502,9 @@ export default function DashboardPage() {
                         const dotShadow = isActive
                           ? "0 0 10px rgba(232,68,15,0.7)"
                           : "0 0 0 rgba(0,0,0,0)";
-                        const pulseColor = "rgba(232,68,15,0.4)";
 
                         return (
                           <span className="relative flex h-2.5 w-2.5">
-                            {isActive && (
-                              <>
-                                <motion.span
-                                  className="absolute inset-0 rounded-full"
-                                  style={{ background: pulseColor }}
-                                  animate={{ scale: [1, 2], opacity: [0.7, 0] }}
-                                  transition={{
-                                    duration: 1.2,
-                                    repeat: Infinity,
-                                    ease: "easeOut",
-                                  }}
-                                />
-                                <motion.span
-                                  className="absolute inset-0 rounded-full"
-                                  style={{ background: pulseColor }}
-                                  animate={{ scale: [1, 2], opacity: [0.55, 0] }}
-                                  transition={{
-                                    duration: 1.2,
-                                    repeat: Infinity,
-                                    ease: "easeOut",
-                                    delay: 0.6,
-                                  }}
-                                />
-                              </>
-                            )}
                             <span
                               className="relative h-2.5 w-2.5 rounded-full"
                               style={{
@@ -487,7 +515,14 @@ export default function DashboardPage() {
                           </span>
                         );
                       })()}
-                      <div
+                      <motion.div
+                        whileHover={{ scale: 1.06 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 280,
+                          damping: 18,
+                          mass: 0.65,
+                        }}
                         className="max-w-[230px] rounded-xl pl-1 pr-2 py-1.5 flex items-center gap-2 text-left transition-colors"
                         style={{
                           background: "var(--bg-elevated)",
@@ -508,7 +543,7 @@ export default function DashboardPage() {
                             #{station.code}
                           </p>
                         </div>
-                      </div>
+                      </motion.div>
                     </div>
                   </motion.button>
                 ))}
@@ -529,6 +564,42 @@ export default function DashboardPage() {
           </div>
         </div>
       </main>
+
+      <AnimatePresence>
+        {diveTransition && (
+          <motion.div
+            className="fixed inset-0 z-[85] pointer-events-none overflow-hidden"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.div
+              className="absolute inset-0"
+              initial={{ scale: 0.04, opacity: 0.84, borderRadius: 999 }}
+              animate={{ scale: 1, opacity: 1, borderRadius: 0 }}
+              transition={{ duration: 0.62, ease: [0.22, 1, 0.36, 1] }}
+              style={{
+                background: "var(--bg-elevated)",
+                transformOrigin: `${diveTransition.originX}px ${diveTransition.originY}px`,
+              }}
+            />
+            <motion.div
+              className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4 text-center"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.2, duration: 0.24 }}
+            >
+              <div className="w-6 h-6 border-2 border-[--color-accent] border-t-transparent rounded-full animate-spin" />
+              <p className="text-sm font-semibold text-[--text-primary]">
+                Diving into {diveTransition.stationName}
+              </p>
+              <p className="text-xs text-[--text-muted]">
+                Loading station #{diveTransition.stationCode}
+              </p>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {isCreateModalOpen && (
@@ -567,7 +638,7 @@ export default function DashboardPage() {
                     Create New Station
                   </p>
                   <p className="text-xs text-[--text-muted] mt-0.5">
-                    Set station name and description.
+                    Set station name and description, or leave name empty for auto-generation.
                   </p>
                 </div>
                 <Button

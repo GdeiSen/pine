@@ -19,6 +19,7 @@ import { formatFileSize, getAvatarFallback } from "@/lib/utils";
 
 type AccessMode = "PUBLIC" | "PRIVATE";
 type StreamQuality = "LOW" | "MEDIUM" | "HIGH";
+type PlaybackMode = "DIRECT" | "BROADCAST";
 
 interface StationSettingsInfo {
   id: string;
@@ -29,6 +30,7 @@ interface StationSettingsInfo {
   isPasswordProtected: boolean;
   crossfadeDuration: number;
   streamQuality: StreamQuality;
+  playbackMode: PlaybackMode;
 }
 
 interface SettingsPanelProps {
@@ -133,6 +135,37 @@ const QUALITY_OPTIONS: Array<{
   },
 ];
 
+const PLAYBACK_MODE_OPTIONS: Array<{
+  value: PlaybackMode;
+  label: string;
+  hint: string;
+  icon: ReactNode;
+}> = [
+  {
+    value: "DIRECT",
+    label: "Direct",
+    hint: "HTTP stream · seek enabled",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11zM6 5.5l4.5 2.5L6 10.5v-5z" />
+      </svg>
+    ),
+  },
+  {
+    value: "BROADCAST",
+    label: "Broadcast",
+    hint: "Icecast stream · radio mode",
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M8 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2zM4.93 4.93a4.5 4.5 0 0 0 0 6.36l1.06-1.06a3 3 0 0 1 0-4.24L4.93 4.93zm6.14 0-1.06 1.06a3 3 0 0 1 0 4.24l1.06 1.06a4.5 4.5 0 0 0 0-6.36zM3.05 3.05a7 7 0 0 0 0 9.9l1.06-1.06a5.5 5.5 0 0 1 0-7.78L3.05 3.05zm9.9 0-1.06 1.06a5.5 5.5 0 0 1 0 7.78l1.06 1.06a7 7 0 0 0 0-9.9z" />
+      </svg>
+    ),
+  },
+];
+
+const DEPLOYMENT_MODE =
+  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() ?? "hybrid";
+
 export function SettingsPanel({
   station,
   onBack,
@@ -156,11 +189,15 @@ export function SettingsPanel({
   const [streamQuality, setStreamQuality] = useState<StreamQuality>(
     (station.streamQuality as StreamQuality) ?? "HIGH",
   );
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(
+    (station.playbackMode as PlaybackMode) ?? "DIRECT",
+  );
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [error, setError] = useState("");
+  const isDirectOnlyDeployment = DEPLOYMENT_MODE === "direct";
 
   const availableStorageLabel = user?.storage
     ? `${formatFileSize(user.storage.availableBytes)} free`
@@ -175,6 +212,7 @@ export function SettingsPanel({
     setAccessMode((station.accessMode as AccessMode) ?? "PRIVATE");
     setPasswordEnabled(!!station.isPasswordProtected);
     setStreamQuality((station.streamQuality as StreamQuality) ?? "HIGH");
+    setPlaybackMode((station.playbackMode as PlaybackMode) ?? "DIRECT");
     setPassword("");
     setError("");
   }, [station]);
@@ -199,6 +237,14 @@ export function SettingsPanel({
   }, []);
 
   const hasPasswordAlready = !!station.isPasswordProtected;
+  const playbackModeOptions = useMemo(
+    () =>
+      isDirectOnlyDeployment
+        ? PLAYBACK_MODE_OPTIONS.filter((opt) => opt.value === "DIRECT")
+        : PLAYBACK_MODE_OPTIONS,
+    [isDirectOnlyDeployment],
+  );
+
   const canSave = useMemo(() => {
     if (!name.trim()) return false;
     const passwordLength = password.trim().length;
@@ -231,6 +277,7 @@ export function SettingsPanel({
           passwordEnabled,
           crossfadeDuration: 3,
           streamQuality,
+          playbackMode,
           ...(passwordEnabled && password.trim()
             ? { password: password.trim() }
             : {}),
@@ -247,6 +294,7 @@ export function SettingsPanel({
         accessMode,
         crossfadeDuration: 3,
         streamQuality,
+        playbackMode,
         isPasswordProtected: passwordEnabled
           ? password.trim().length >= 6 || hasPasswordAlready
           : false,
@@ -507,16 +555,17 @@ export function SettingsPanel({
                     maxLength={8}
                     disabled={!passwordEnabled}
                     onClick={(e) => e.stopPropagation()}
-                    onChange={(e) =>
-                      setPassword(e.target.value.slice(0, 8))
-                    }
+                    onChange={(e) => setPassword(e.target.value.slice(0, 8))}
                     placeholder={
                       hasPasswordAlready
                         ? "Enter new password (max 8)"
                         : "Set password (6-8 chars)"
                     }
                     className="mt-2 w-full h-9 px-3 rounded-lg text-xs text-[--text-primary] placeholder:text-[--text-muted] focus:outline-none disabled:opacity-60"
-                    style={{ border: "1px solid var(--border)", background: "var(--bg-elevated)" }}
+                    style={{
+                      border: "1px solid var(--border)",
+                      background: "var(--bg-elevated)",
+                    }}
                   />
                 </div>
               </button>
@@ -526,8 +575,61 @@ export function SettingsPanel({
           <motion.section
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.06 }}
+          >
+            <div className="flex items-center gap-2 mb-6">
+              <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
+                Station Mode
+              </p>
+            </div>
+            <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
+              {isDirectOnlyDeployment
+                ? "This deployment runs in direct-only mode. Tracks stream over HTTP with seek support."
+                : "Direct mode streams tracks over HTTP with seek support. Broadcast mode uses Icecast for unlimited concurrent listeners without seek."}
+            </p>
+            <div className="flex flex-wrap gap-2 items-stretch">
+              {playbackModeOptions.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setPlaybackMode(opt.value)}
+                  className="w-[138px] h-[122px] rounded-xl p-3 transition-colors text-left shrink-0 flex flex-col justify-between"
+                  style={{
+                    background:
+                      playbackMode === opt.value
+                        ? isDarkTheme
+                          ? "var(--bg-inset)"
+                          : "rgba(255,255,255,0.92)"
+                        : isDarkTheme
+                          ? "rgba(255,255,255,0.07)"
+                          : "rgba(0,0,0,0.06)",
+                    border: `2px solid ${
+                      playbackMode === opt.value
+                        ? isDarkTheme
+                          ? "var(--color-accent)"
+                          : "rgba(24,23,15,0.55)"
+                        : "var(--border)"
+                    }`,
+                  }}
+                >
+                  <div className="text-[--text-primary]">{opt.icon}</div>
+                  <div>
+                    <p className="text-sm font-semibold text-[--text-primary] leading-tight">
+                      {opt.label}
+                    </p>
+                    <p className="text-[10px] text-[--text-muted] mt-1 leading-tight">
+                      {opt.hint}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </motion.section>
+
+          <motion.section
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.09 }}
-            className="rounded-2xl mt-8"
+            className="rounded-2xl mt-2"
             style={{}}
           >
             <div className="h-full flex flex-col justify-between">
@@ -594,7 +696,8 @@ export function SettingsPanel({
               Danger Zone
             </p>
             <p className="text-sm text-[--text-muted] mb-4">
-              Remove this station completely with its queue, tracks and settings.
+              Remove this station completely with its queue, tracks and
+              settings.
             </p>
             <Button
               variant="danger"
@@ -610,7 +713,7 @@ export function SettingsPanel({
       </div>
 
       <div
-        className="px-4 py-3 flex items-center justify-between gap-2"
+        className="h-16 px-4 flex items-center justify-between gap-2"
         style={{ borderTop: "1px solid var(--border)" }}
       >
         {error ? (

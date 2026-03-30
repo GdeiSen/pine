@@ -7,6 +7,7 @@ import {
   Param,
   Body,
   Query,
+  Headers,
   UseGuards,
   UseInterceptors,
   UploadedFile,
@@ -57,9 +58,15 @@ export class TracksController {
       limits: { fileSize: MAX_FILE_SIZE_BYTES },
       fileFilter: (_req, file, cb) => {
         const ext = path.extname(file.originalname).toLowerCase()
-        const isMimeAllowed = SUPPORTED_AUDIO_FORMATS.includes(file.mimetype)
+        const normalizedMime = String(file.mimetype ?? '').toLowerCase()
+        const isMimeAllowed = SUPPORTED_AUDIO_FORMATS.includes(normalizedMime)
+        const isFallbackMime =
+          normalizedMime.length === 0 ||
+          normalizedMime === 'application/octet-stream' ||
+          normalizedMime === 'binary/octet-stream'
+        const isAudioMime = normalizedMime.startsWith('audio/')
         const isExtAllowed = SUPPORTED_EXTENSIONS.includes(ext)
-        if (isMimeAllowed && isExtAllowed) cb(null, true)
+        if (isExtAllowed && (isMimeAllowed || isAudioMime || isFallbackMime)) cb(null, true)
         else cb(new BadRequestException('Unsupported audio format'), false)
       },
     }),
@@ -81,6 +88,18 @@ export class TracksController {
     @CurrentUser() user: { id: string },
   ) {
     return this.tracksService.getStationTracks(stationId, user.id)
+  }
+
+  @Get('tracks/:id/stream')
+  @UseGuards(OptionalJwtGuard)
+  @SkipThrottle()
+  async streamTrack(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @CurrentUser() user: { id: string } | null,
+    @Headers('range') rangeHeader: string | undefined,
+    @Res() res: Response,
+  ) {
+    return this.tracksService.streamTrack(id, res, rangeHeader, user?.id)
   }
 
   @Get('tracks/:id/cover')

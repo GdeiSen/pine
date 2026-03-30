@@ -9,6 +9,8 @@ const BUFFERING_GRACE_MS = 4_500
 const RECONNECT_BASE_DELAY_MS = 1_000
 const RECONNECT_MAX_DELAY_MS = 8_000
 const HARD_RELOAD_EVERY_ATTEMPTS = 3
+const VOLUME_FADE_IN_MS = 1200
+const VOLUME_FADE_OUT_MS = 1200
 
 export function normalizeTrackStartedAt(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -76,6 +78,13 @@ function isAutoplayBlock(error: unknown) {
   return name === 'NotAllowedError' || name === 'AbortError'
 }
 
+function clampVolume(value: number) {
+  if (!Number.isFinite(value)) return 1
+  if (value < 0) return 0
+  if (value > 1) return 1
+  return value
+}
+
 export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadioPlaybackEngineArgs) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const sourceUrlRef = useRef<string | null>(null)
@@ -85,6 +94,9 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
   const bufferingTimerRef = useRef<number | null>(null)
   const reconnectAttemptsRef = useRef(0)
   const playTokenRef = useRef(0)
+  const volumeFadeRafRef = useRef<number | null>(null)
+  const volumeFadeTokenRef = useRef(0)
+  const targetVolumeRef = useRef(clampVolume(volume))
 
   const [audioConnectionState, setAudioConnectionState] = useState<AudioConnectionState>('idle')
   const [audioConnectionMessage, setAudioConnectionMessage] = useState<string | null>(null)
@@ -121,6 +133,75 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     }
   }, [])
 
+  const stopVolumeFade = useCallback(() => {
+    if (volumeFadeRafRef.current !== null) {
+      window.cancelAnimationFrame(volumeFadeRafRef.current)
+      volumeFadeRafRef.current = null
+    }
+    volumeFadeTokenRef.current += 1
+  }, [])
+
+  const fadeVolumeTo = useCallback(
+    (target: number, durationMs: number, onComplete?: () => void) => {
+      const audio = audioRef.current
+      if (!audio) {
+        onComplete?.()
+        return
+      }
+
+      const clampedTarget = clampVolume(target)
+      const startVolume = clampVolume(audio.volume)
+      const duration = Math.max(0, durationMs)
+
+      if (duration <= 0 || Math.abs(startVolume - clampedTarget) < 0.001) {
+        audio.volume = clampedTarget
+        onComplete?.()
+        return
+      }
+
+      if (volumeFadeRafRef.current !== null) {
+        window.cancelAnimationFrame(volumeFadeRafRef.current)
+      }
+
+      const token = ++volumeFadeTokenRef.current
+      const startedAt = performance.now()
+
+      const step = (now: number) => {
+        if (!mountedRef.current || token !== volumeFadeTokenRef.current) return
+        const currentAudio = audioRef.current
+        if (!currentAudio) return
+
+        const t = Math.max(0, Math.min(1, (now - startedAt) / duration))
+        const eased = 1 - Math.pow(1 - t, 3)
+        currentAudio.volume = clampVolume(
+          startVolume + (clampedTarget - startVolume) * eased,
+        )
+
+        if (t < 1) {
+          volumeFadeRafRef.current = window.requestAnimationFrame(step)
+          return
+        }
+
+        volumeFadeRafRef.current = null
+        onComplete?.()
+      }
+
+      volumeFadeRafRef.current = window.requestAnimationFrame(step)
+    },
+    [],
+  )
+
+  const fadeInToTargetVolume = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    const target = targetVolumeRef.current
+    if (target <= 0) {
+      audio.volume = 0
+      return
+    }
+    fadeVolumeTo(target, VOLUME_FADE_IN_MS)
+  }, [fadeVolumeTo])
+
   const attemptPlayback = useCallback(
     async (mode: 'normal' | 'reconnect' = 'normal') => {
       const audio = audioRef.current
@@ -148,8 +229,11 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
         mode === 'reconnect' ? 'Reconnecting stream...' : 'Connecting to stream...')
 
       try {
+        stopVolumeFade()
+        audio.volume = 0
         await audio.play()
         if (!mountedRef.current || token !== playTokenRef.current) return
+        fadeInToTargetVolume()
         reconnectAttemptsRef.current = 0
         setAudioNeedsRestart(false)
         setConnectionStatus('playing', null)
@@ -175,7 +259,7 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
         }, delay)
       }
     },
-    [clearTimers, setConnectionStatus],
+    [clearTimers, fadeInToTargetVolume, setConnectionStatus, stopVolumeFade],
   )
 
   const reportDrift = useCallback(
@@ -214,7 +298,7 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     mountedRef.current = true
     const audio = new Audio()
     audio.preload = 'auto'
-    audio.volume = volume
+    audio.volume = targetVolumeRef.current
 
     audioRef.current = audio
 
@@ -279,6 +363,7 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     audio.addEventListener('error', onError)
 
     return () => {
+      stopVolumeFade()
       audio.removeEventListener('playing', onPlaying)
       audio.removeEventListener('canplay', onCanPlay)
       audio.removeEventListener('waiting', onWaiting)
@@ -294,13 +379,19 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
       reconnectAttemptsRef.current = 0
       playTokenRef.current += 1
     }
-  }, [attemptPlayback, clearTimers, setConnectionStatus])
+  }, [attemptPlayback, clearTimers, setConnectionStatus, stopVolumeFade])
 
   useEffect(() => {
+    targetVolumeRef.current = clampVolume(volume)
     const audio = audioRef.current
     if (!audio) return
-    audio.volume = volume
-  }, [volume])
+    if (audio.paused) {
+      stopVolumeFade()
+      audio.volume = targetVolumeRef.current
+      return
+    }
+    audio.volume = targetVolumeRef.current
+  }, [volume, stopVolumeFade])
 
   useEffect(() => {
     desiredRef.current = { streamUrl, isPlaying }
@@ -310,6 +401,7 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     if (!audio) return
 
     if (!streamUrl) {
+      stopVolumeFade()
       audio.pause()
       audio.removeAttribute('src')
       audio.load()
@@ -326,15 +418,30 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
         audio.src = streamUrl
         audio.load()
       }
-      audio.pause()
-      reconnectAttemptsRef.current = 0
-      setAudioNeedsRestart(false)
+
+      const finishPause = () => {
+        const currentAudio = audioRef.current
+        if (!currentAudio) return
+        if (desiredRef.current.isPlaying) return
+        currentAudio.pause()
+        currentAudio.volume = targetVolumeRef.current
+        reconnectAttemptsRef.current = 0
+        setAudioNeedsRestart(false)
+      }
+
+      if (!audio.paused && audio.volume > 0.001) {
+        stopVolumeFade()
+        fadeVolumeTo(0, VOLUME_FADE_OUT_MS, finishPause)
+      } else {
+        stopVolumeFade()
+        finishPause()
+      }
       setConnectionStatus('paused', null)
       return
     }
 
     void attemptPlayback('normal')
-  }, [attemptPlayback, clearTimers, isPlaying, setConnectionStatus, streamUrl])
+  }, [attemptPlayback, clearTimers, fadeVolumeTo, isPlaying, setConnectionStatus, stopVolumeFade, streamUrl])
 
   const restartAudio = useCallback(async () => {
     const audio = audioRef.current
@@ -346,13 +453,16 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     }
 
     clearTimers()
+    stopVolumeFade()
     sourceUrlRef.current = desired.streamUrl
     audio.src = desired.streamUrl
     audio.load()
     setAudioNeedsRestart(false)
     setConnectionStatus('connecting', 'Connecting to stream...')
     try {
+      audio.volume = 0
       await audio.play()
+      fadeInToTargetVolume()
       reconnectAttemptsRef.current = 0
       setConnectionStatus('playing', null)
     } catch (error) {
@@ -368,7 +478,9 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
         void attemptPlayback('reconnect')
       }, RECONNECT_BASE_DELAY_MS)
     }
-  }, [attemptPlayback, clearTimers, setConnectionStatus])
+  }, [attemptPlayback, clearTimers, fadeInToTargetVolume, setConnectionStatus, stopVolumeFade])
+
+  const beginTransition = useCallback(() => {}, [])
 
   return {
     audioNeedsRestart,
@@ -376,6 +488,7 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     audioConnectionMessage,
     audioDiagnostics,
     audioRef,
+    beginTransition,
     reportDrift,
     restartAudio,
   }

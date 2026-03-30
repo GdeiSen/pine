@@ -2,7 +2,7 @@
 
 import { use, useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, LayoutGroup } from "framer-motion";
 import { useStation } from "@/hooks/useStation";
 import { useAuthStore } from "@/stores/auth.store";
 import { LeftPanel } from "@/components/station/left-panel";
@@ -45,6 +45,7 @@ type PublicGuestStation = {
   listenerCount: number;
   accessMode: "PUBLIC" | "PRIVATE";
   isPasswordProtected: boolean;
+  playbackMode?: "DIRECT" | "BROADCAST";
   currentTrackId: string | null;
   currentTrack?: {
     id: string;
@@ -70,7 +71,13 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
 
 const MAX_MEMBERS_ON_MAP = 10;
 const MAX_ADMINS_PER_STATION = 10;
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
+const STACK_LAYOUT_TRANSITION = {
+  type: "spring" as const,
+  stiffness: 125,
+  damping: 24,
+  mass: 0.95,
+};
 
 function formatApiError(err: any, fallback: string) {
   const message = err?.response?.data?.message;
@@ -298,6 +305,7 @@ export default function StationPage({
   const {
     station,
     playback,
+    effectiveTrackDuration,
     queue,
     members,
     chat,
@@ -325,6 +333,13 @@ export default function StationPage({
   const userQueueCount = queue.filter(
     (item) => item.queueType === "USER",
   ).length;
+  const nextQueueTrack = queue[0]?.track ?? null;
+  const nextTrackHint = useMemo(() => {
+    if (!nextQueueTrack) return null;
+    const title = nextQueueTrack.title?.trim() || "Unknown track";
+    const artist = nextQueueTrack.artist?.trim();
+    return artist ? `${title} — ${artist}` : title;
+  }, [nextQueueTrack]);
   const currentMember = members.find((member) => member.user.id === user?.id);
   const isOwner =
     station?.owner?.id === user?.id || currentMember?.role === MemberRole.OWNER;
@@ -333,6 +348,7 @@ export default function StationPage({
     currentMember?.permissions?.includes(Permission.PLAYBACK_CONTROL) ?? false;
   const canControl = isOwner || isAdmin || hasPlaybackPermission;
   const canManageMembers = isOwner || isAdmin;
+  const isBroadcastMode = station?.playbackMode === "BROADCAST";
 
   const normalizedMemberSearch = useMemo(
     () => memberSearch.trim().toLowerCase(),
@@ -779,6 +795,7 @@ export default function StationPage({
         stationCode={guestListenState.code ?? code}
         stationName={guestListenState.name}
         stationDescription={guestListenState.description}
+        stationPlaybackSeconds={guestListenState.currentPosition ?? 0}
         isPlaying={
           !!guestListenState.currentTrackId && !guestListenState.isPaused
         }
@@ -794,6 +811,7 @@ export default function StationPage({
             listenerCount: guestListenState.listenerCount ?? 0,
             accessMode: guestListenState.accessMode,
             isPasswordProtected: guestListenState.isPasswordProtected,
+            playbackMode: guestListenState.playbackMode ?? "BROADCAST",
             currentTrackId: guestListenState.currentTrackId,
             currentTrack: guestListenState.currentTrack ?? null,
             currentPosition: guestListenState.currentPosition ?? 0,
@@ -837,6 +855,7 @@ export default function StationPage({
         stationCode={station?.code ?? code}
         stationName={station?.name}
         stationDescription={station?.description}
+        stationPlaybackSeconds={playback.currentPosition}
         isPlaying={isPlaying}
         isPaused={isPaused}
         showConnectionDot
@@ -963,6 +982,7 @@ export default function StationPage({
               stationCode={station?.code ?? code}
               stationName={station?.name}
               stationDescription={station?.description}
+              stationPlaybackSeconds={playback.currentPosition}
               messages={chat}
               onSendMessage={sendChatMessage}
               currentUserId={user?.id}
@@ -983,6 +1003,7 @@ export default function StationPage({
                 isPasswordProtected: station?.isPasswordProtected ?? false,
                 crossfadeDuration: station?.crossfadeDuration ?? 3,
                 streamQuality: station?.streamQuality ?? "HIGH",
+                playbackMode: station?.playbackMode ?? "DIRECT",
               }}
               onBack={() => setContentMode("station")}
               onSaved={(patch) => {
@@ -1003,10 +1024,12 @@ export default function StationPage({
               }}
             />
           ) : (
-            <>
+            <LayoutGroup id="station-player-stack">
               {/* Track info + controls */}
-              <div
+              <motion.div
+                layout
                 ref={trackInfoRef}
+                transition={{ layout: STACK_LAYOUT_TRANSITION }}
                 style={{
                   borderBottom: "1px solid var(--border)",
                   background: "var(--bg-elevated)",
@@ -1014,8 +1037,9 @@ export default function StationPage({
               >
                 <TrackInfo
                   track={track}
-                  currentQueueType={playback.currentQueueType}
                   currentPosition={playback.currentPosition}
+                  displayDuration={effectiveTrackDuration}
+                  nextTrackHint={nextTrackHint}
                   isPaused={isPaused}
                   isPlaying={isPlaying}
                   listenerCount={station?.listenerCount ?? 0}
@@ -1032,14 +1056,18 @@ export default function StationPage({
                   onRestartAudio={restartAudio}
                   onSkip={handleSkip}
                   onPrev={handlePrev}
-                  onSeek={handleSeek}
+                  onSeek={isBroadcastMode ? () => {} : handleSeek}
+                  progressInteractive={!isBroadcastMode}
+                  transportControlsEnabled={!isBroadcastMode}
                   onToggleLoop={handleToggleLoop}
                   onToggleShuffle={handleToggleShuffle}
                 />
-              </div>
+              </motion.div>
 
               {/* Tabs */}
-              <div
+              <motion.div
+                layout
+                transition={{ layout: STACK_LAYOUT_TRANSITION }}
                 className="flex items-center gap-0 px-1"
                 style={{
                   borderBottom: "1px solid var(--border)",
@@ -1078,10 +1106,13 @@ export default function StationPage({
                     )}
                   </button>
                 ))}
-              </div>
+              </motion.div>
 
               {/* Tab content */}
-              <div
+              <motion.div
+                layout
+                layoutScroll
+                transition={{ layout: STACK_LAYOUT_TRANSITION }}
                 ref={contentScrollRef}
                 className="flex-1 overflow-y-auto"
                 style={{ background: "var(--bg)" }}
@@ -1439,8 +1470,8 @@ export default function StationPage({
                     </motion.div>
                   )}
                 </AnimatePresence>
-              </div>
-            </>
+              </motion.div>
+            </LayoutGroup>
           )}
         </div>
       </div>

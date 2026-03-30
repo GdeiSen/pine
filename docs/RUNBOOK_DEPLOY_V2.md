@@ -9,8 +9,8 @@ This runbook deploys the full v2 stack with Docker Compose:
 - `icecast`
 - `liquidsoap`
 - `api` (NestJS)
-- `worker-playout`
-- `worker-transcode`
+- `playback-worker`
+- `media-worker`
 - `web` (Next.js)
 - `nginx` (reverse proxy)
 - optional observability overlay: `prometheus`, `grafana`, `blackbox-exporter`, `postgres-exporter`
@@ -120,7 +120,7 @@ docker compose --env-file infra/.env -f infra/docker-compose.v2.yml up -d --buil
 1. No sound:
 - check `liquidsoap` logs
 - check `icecast` source connected
-- check `worker-playout` logs
+- check `playback-worker` logs
 - in Grafana, inspect `PINE v2 Playback Health`
 
 2. UI stale / wrong state:

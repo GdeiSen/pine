@@ -46,7 +46,7 @@ docker compose \
 
 - `PineApiDown`: API readiness is failing.
 - `PineStreamMountDown`: the stream mount is unreachable.
-- `PinePlaybackHeartbeatMissing`: the playout worker has not synchronized playback state recently.
+- `PinePlaybackHeartbeatMissing`: the playback worker has not synchronized playback state recently.
 - `PineWorkerStalled`: a command has been stuck in processing too long.
 - `PineHighCommandBacklog`: pending commands are accumulating.
 - `PineOutboxBacklog`: playback events are backing up.

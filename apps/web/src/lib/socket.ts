@@ -1,13 +1,15 @@
 import { io, Socket } from 'socket.io-client'
+import { resolveConfiguredOrigin } from '@/lib/origin'
 
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL ?? 'http://localhost:3001'
+const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL ?? ''
 
 let socket: Socket | null = null
 
 export function getSocket(): Socket {
   if (!socket) {
     const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null
-    socket = io(`${SOCKET_URL}/station`, {
+    const socketBaseUrl = resolveConfiguredOrigin(SOCKET_URL)
+    socket = io(socketBaseUrl ? `${socketBaseUrl}/station` : '/station', {
       auth: { token: token ?? '' },
       autoConnect: false,
       reconnection: true,

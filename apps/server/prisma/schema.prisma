@@ -87,6 +87,13 @@ enum SystemQueueMode {
   @@map("system_queue_mode")
 }
 
+enum StationPlaybackMode {
+  DIRECT
+  BROADCAST
+
+  @@map("station_playback_mode")
+}
+
 enum PlaybackLoopMode {
   NONE
   TRACK
@@ -208,6 +215,7 @@ model Station {
   systemQueueMode   SystemQueueMode   @default(SEQUENTIAL)
   crossfadeDuration Int               @default(3)
   streamQuality     StreamQuality     @default(HIGH)
+  playbackMode      StationPlaybackMode @default(DIRECT)
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 

@@ -1,5 +1,5 @@
 import { IsString, MinLength, MaxLength, IsOptional, IsEnum, IsInt, Min, Max, IsBoolean } from 'class-validator'
-import { StationAccessMode, StreamQuality } from '@web-radio/shared'
+import { StationAccessMode, StationPlaybackMode, StreamQuality } from '@web-radio/shared'
 
 export class UpdateStationDto {
   @IsOptional()
@@ -36,4 +36,8 @@ export class UpdateStationDto {
   @IsOptional()
   @IsEnum(StreamQuality)
   streamQuality?: StreamQuality
+
+  @IsOptional()
+  @IsEnum(StationPlaybackMode)
+  playbackMode?: StationPlaybackMode
 }

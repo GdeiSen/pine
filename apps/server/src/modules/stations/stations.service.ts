@@ -15,7 +15,36 @@ import { CreateStationDto } from './dto/create-station.dto'
 import { UpdateStationDto } from './dto/update-station.dto'
 import { StorageService } from '../storage/storage.service'
 import { StorageScope } from '../storage/storage.config'
-import { StationAccessMode, MemberRole, ROLE_PERMISSIONS, StreamQuality } from '@web-radio/shared'
+import { StationAccessMode, MemberRole, ROLE_PERMISSIONS, StationPlaybackMode, StreamQuality } from '@web-radio/shared'
+
+const FALLBACK_STATION_NAME_PHRASES = [
+  'Morning Static',
+  'Cloudline Radio',
+  'Silver Echo',
+  'Night Drift',
+  'Signal Harbor',
+  'Neon Meadow',
+  'Velvet Noise',
+  'Afterglow FM',
+  'Late Route',
+  'Dawn Current',
+  'Wild Frequency',
+  'Paper Waves',
+] as const
+
+const FALLBACK_STATION_DESCRIPTION_OPENERS = [
+  'A steady mix of warm melodies, relaxed beats, and tracks that keep focus without rushing the mood.',
+  'A balanced stream of fresh songs and familiar favorites designed for long listening sessions.',
+  'An easy-flow station with layered instrumentals, clear vocals, and a calm late-evening atmosphere.',
+  'A curated set of modern indie, light electronic textures, and melodic cuts with clean transitions.',
+] as const
+
+const FALLBACK_STATION_DESCRIPTION_CLOSERS = [
+  'Perfect for background listening, creative work, and quiet evenings online.',
+  'Built for deep work, smooth pacing, and moments when you want music to feel effortless.',
+  'Great for reading, coding, and long conversations with music that stays present but never loud.',
+  'Made for daily routines where rhythm matters and every next track feels intentional.',
+] as const
 
 @Injectable()
 export class StationsService {
@@ -51,12 +80,17 @@ export class StationsService {
       passwordHash = await bcrypt.hash(dto.password, 10)
     }
 
+    const providedName = this.normalizeOptionalText(dto.name)
+    const providedDescription = this.normalizeOptionalText(dto.description)
+    const stationName = providedName ?? this.generateFallbackStationName()
+    const stationDescription = providedDescription ?? this.generateFallbackStationDescription(stationName)
+
     const station = await this.prisma.$transaction(async (tx) => {
       const s = await tx.station.create({
         data: {
           code,
-          name: dto.name,
-          description: dto.description,
+          name: stationName,
+          description: stationDescription,
           ownerId: userId,
           accessMode,
           passwordHash,
@@ -248,6 +282,7 @@ export class StationsService {
 
   async update(stationId: string, userId: string, dto: UpdateStationDto) {
     const current = await this.assertOwner(stationId, userId)
+    this.assertPlaybackModeAllowed(dto.playbackMode)
     const nextAccessMode = dto.accessMode
       ? this.normalizeAccessMode(dto.accessMode)
       : this.normalizeAccessMode(current.accessMode)
@@ -274,6 +309,7 @@ export class StationsService {
         ...(dto.accessMode && { accessMode: nextAccessMode }),
         ...(dto.crossfadeDuration !== undefined && { crossfadeDuration: dto.crossfadeDuration }),
         ...(dto.streamQuality && { streamQuality: dto.streamQuality }),
+        ...(dto.playbackMode && { playbackMode: this.resolvePlaybackMode(dto.playbackMode) }),
         ...(passwordHash !== undefined && { passwordHash }),
       },
       include: {
@@ -363,6 +399,28 @@ export class StationsService {
     throw new ConflictException('Could not generate unique code')
   }
 
+  private normalizeOptionalText(value?: string | null) {
+    if (typeof value !== 'string') return undefined
+    const normalized = value.trim()
+    return normalized.length > 0 ? normalized : undefined
+  }
+
+  private pickRandom<T>(items: readonly T[]): T {
+    return items[Math.floor(Math.random() * items.length)]
+  }
+
+  private generateFallbackStationName() {
+    return this.pickRandom(FALLBACK_STATION_NAME_PHRASES)
+  }
+
+  private generateFallbackStationDescription(stationName: string) {
+    const opener = this.pickRandom(FALLBACK_STATION_DESCRIPTION_OPENERS)
+    const closer = this.pickRandom(FALLBACK_STATION_DESCRIPTION_CLOSERS)
+    const description = `${stationName} brings a carefully selected vibe. ${opener} ${closer}`
+    if (description.length <= 300) return description
+    return `${description.slice(0, 297).trimEnd()}...`
+  }
+
   private async assertOwner(stationId: string, userId: string) {
     const station = await this.prisma.station.findUnique({ where: { id: stationId } })
     if (!station) throw new NotFoundException('Station not found')
@@ -407,12 +465,14 @@ export class StationsService {
       currentTrack: currentTrack
         ? {
             id: currentTrack.id,
+            filename: currentTrack.filename,
             title: currentTrack.title,
             artist: currentTrack.artist,
             album: currentTrack.album,
             year: currentTrack.year,
             genre: currentTrack.genre,
             duration: currentTrack.duration,
+            bitrate: currentTrack.bitrate,
             hasCover: !!currentTrack.coverPath,
             quality: currentTrack.quality,
             uploadedBy: currentTrack.uploadedBy,
@@ -424,6 +484,9 @@ export class StationsService {
       pausedPosition: playbackState.pausedPosition,
       crossfadeDuration: station.crossfadeDuration,
       streamQuality: station.streamQuality,
+      playbackMode: this.resolvePlaybackMode(
+        (station.playbackMode as StationPlaybackMode | undefined) ?? StationPlaybackMode.DIRECT,
+      ),
       activePlaylistId: station.activePlaylistId,
       listenerCount,
       createdAt: station.createdAt,
@@ -529,6 +592,28 @@ export class StationsService {
       return StationAccessMode.PRIVATE
     }
     throw new BadRequestException(`Unsupported access mode: ${accessMode}`)
+  }
+
+  private resolvePlaybackMode(playbackMode?: StationPlaybackMode | string | null) {
+    if (this.isDirectOnlyDeployment()) {
+      return StationPlaybackMode.DIRECT
+    }
+
+    return playbackMode === StationPlaybackMode.BROADCAST
+      ? StationPlaybackMode.BROADCAST
+      : StationPlaybackMode.DIRECT
+  }
+
+  private assertPlaybackModeAllowed(playbackMode?: StationPlaybackMode | null) {
+    if (!playbackMode) return
+    if (this.isDirectOnlyDeployment() && playbackMode === StationPlaybackMode.BROADCAST) {
+      throw new BadRequestException('Broadcast mode is disabled in this deployment')
+    }
+  }
+
+  private isDirectOnlyDeployment() {
+    const mode = this.configService.get<string>('APP_DEPLOYMENT_MODE')?.trim().toLowerCase()
+    return mode === 'direct'
   }
 
   private buildStreamEndpoints(code: string) {

@@ -23,10 +23,16 @@ const minioClient = createMinioClientFromEnv()
 const storageBuckets = resolveStorageBucketsFromEnv()
 const tracksBucket = resolveBucketByScope('tracks', storageBuckets)
 
-const POLL_INTERVAL_MS = Number.parseInt(process.env.PLAYOUT_POLL_INTERVAL_MS ?? '500', 10)
-const HEARTBEAT_INTERVAL_MS = Number.parseInt(process.env.PLAYOUT_HEARTBEAT_INTERVAL_MS ?? '30000', 10)
+const POLL_INTERVAL_MS = Number.parseInt(
+  process.env.PLAYBACK_POLL_INTERVAL_MS ?? process.env.PLAYOUT_POLL_INTERVAL_MS ?? '100',
+  10,
+)
+const HEARTBEAT_INTERVAL_MS = Number.parseInt(
+  process.env.PLAYBACK_HEARTBEAT_INTERVAL_MS ?? process.env.PLAYOUT_HEARTBEAT_INTERVAL_MS ?? '30000',
+  10,
+)
 const RECONCILE_INTERVAL_MS = Number.parseInt(
-  process.env.PLAYOUT_RECONCILE_INTERVAL_MS ?? '5000',
+  process.env.PLAYBACK_RECONCILE_INTERVAL_MS ?? process.env.PLAYOUT_RECONCILE_INTERVAL_MS ?? '5000',
   10,
 )
 const LIQUIDSOAP_CONTROL_DIR = process.env.LIQUIDSOAP_CONTROL_DIR ?? '/var/lib/liquidsoap/control'
@@ -88,6 +94,10 @@ type QueueSnapshotItem = {
 
 function nowIso() {
   return new Date().toISOString()
+}
+
+function isDirectOnlyDeployment() {
+  return process.env.APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
 }
 
 function safeMessage(error: unknown) {
@@ -311,31 +321,18 @@ async function resolveNextQueueItem(
 async function resolvePreviousQueueItem(
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
   stationId: string,
-  preferredQueueType?: QueueType | null,
 ) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
-    const baseWhere = {
-      stationId,
-      status: { in: [QueueItemStatus.PLAYED, QueueItemStatus.SKIPPED] as QueueItemStatus[] },
-    }
-
-    const previousItem =
-      (preferredQueueType
-        ? await tx.queueItem.findFirst({
-            where: { ...baseWhere, queueType: preferredQueueType },
-            orderBy: [{ playedAt: 'desc' }, { createdAt: 'desc' }, { position: 'desc' }],
-            include: {
-              track: { select: { id: true, duration: true } },
-            },
-          })
-        : null) ??
-      (await tx.queueItem.findFirst({
-        where: baseWhere,
-        orderBy: [{ playedAt: 'desc' }, { createdAt: 'desc' }, { position: 'desc' }],
-        include: {
-          track: { select: { id: true, duration: true } },
-        },
-      }))
+    const previousItem = await tx.queueItem.findFirst({
+      where: {
+        stationId,
+        status: { in: [QueueItemStatus.PLAYED, QueueItemStatus.SKIPPED] as QueueItemStatus[] },
+      },
+      orderBy: [{ playedAt: 'desc' }, { createdAt: 'desc' }, { position: 'desc' }],
+      include: {
+        track: { select: { id: true, duration: true } },
+      },
+    })
 
     if (previousItem?.track) return previousItem
     if (previousItem && !previousItem.track) {
@@ -702,6 +699,73 @@ async function applyQueueAddCommand(
   return snapshotQueueTx(tx, stationId)
 }
 
+async function applyQueuePlayNowTransition(
+  tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
+  stationId: string,
+  commandId: string,
+  now: Date,
+) {
+  const state = await loadOrCreateState(tx, stationId)
+  const nextItem = await resolveNextQueueItem(tx, stationId)
+  if (!nextItem) return false
+
+  if (state.currentQueueItemId) {
+    await tx.queueItem.updateMany({
+      where: { id: state.currentQueueItemId, status: QueueItemStatus.PLAYING },
+      data: {
+        status: QueueItemStatus.SKIPPED,
+        playedAt: now,
+      },
+    })
+  }
+
+  await tx.queueItem.update({
+    where: { id: nextItem.id },
+    data: { status: QueueItemStatus.PLAYING },
+  })
+
+  const nextState = await tx.playbackState.update({
+    where: { stationId },
+    data: {
+      currentTrackId: nextItem.track.id,
+      currentQueueItemId: nextItem.id,
+      currentQueueType: nextItem.queueType,
+      currentPosition: 0,
+      currentTrackDuration: nextItem.track.duration || 0,
+      trackStartedAt: now,
+      isPaused: false,
+      pausedPosition: 0,
+      version: { increment: 1 },
+      lastSyncedAt: now,
+    },
+  })
+
+  await tx.playbackEvent.create({
+    data: {
+      stationId,
+      type: PlaybackEventType.TRACK_CHANGED,
+      commandId,
+      payload: {
+        version: nextState.version,
+        currentTrackId: nextState.currentTrackId,
+        currentQueueItemId: nextState.currentQueueItemId,
+        currentQueueType: nextState.currentQueueType,
+        currentPosition: nextState.currentPosition,
+        currentTrackDuration: nextState.currentTrackDuration,
+        isPaused: nextState.isPaused,
+        trackStartedAt: nextState.trackStartedAt?.toISOString() ?? null,
+        loopMode: nextState.loopMode,
+        shuffleEnabled: nextState.shuffleEnabled,
+        serverTime: now.toISOString(),
+        commandType: PlaybackCommandType.QUEUE_ADD,
+        sourceType: 'queue-now',
+      },
+    },
+  })
+
+  return true
+}
+
 async function applyQueueRemoveCommand(
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
   stationId: string,
@@ -954,6 +1018,18 @@ async function buildLiquidsoapSnapshot(stationId: string) {
   }
 }
 
+async function isBroadcastStation(stationId: string): Promise<boolean> {
+  if (isDirectOnlyDeployment()) {
+    return false
+  }
+
+  const station = await prisma.station.findUnique({
+    where: { id: stationId },
+    select: { playbackMode: true },
+  })
+  return station?.playbackMode === 'BROADCAST'
+}
+
 async function syncLiquidsoapStation(stationId: string, action?: LiquidsoapAction) {
   if (controlInFlight.has(stationId)) return
   controlInFlight.add(stationId)
@@ -998,6 +1074,42 @@ async function markTrackPlaybackTransition(
 
   if (state.currentTrackDuration > 0 && currentPosition < Math.max(state.currentTrackDuration - 0.25, 0)) {
     return { changed: false, state }
+  }
+
+  if (state.loopMode === PlaybackLoopMode.TRACK) {
+    const repeatedState = await tx.playbackState.update({
+      where: { stationId },
+      data: {
+        currentPosition: 0,
+        trackStartedAt: now,
+        isPaused: false,
+        pausedPosition: 0,
+        version: { increment: 1 },
+        lastSyncedAt: now,
+      },
+    })
+
+    await tx.playbackEvent.create({
+      data: {
+        stationId,
+        type: PlaybackEventType.TRACK_CHANGED,
+        payload: {
+          autoAdvance: true,
+          currentTrackId: repeatedState.currentTrackId,
+          currentQueueItemId: repeatedState.currentQueueItemId,
+          currentQueueType: repeatedState.currentQueueType,
+          currentPosition: repeatedState.currentPosition,
+          currentTrackDuration: repeatedState.currentTrackDuration,
+          isPaused: repeatedState.isPaused,
+          trackStartedAt: repeatedState.trackStartedAt?.toISOString() ?? null,
+          loopMode: repeatedState.loopMode,
+          shuffleEnabled: repeatedState.shuffleEnabled,
+          serverTime: now.toISOString(),
+        },
+      },
+    })
+
+    return { changed: true, state: repeatedState }
   }
 
   if (state.currentQueueItemId) {
@@ -1114,15 +1226,29 @@ async function applyCommand(command: {
 
       const now = new Date()
       const addedById = command.createdById
+      const queueAddMode =
+        command.type === PlaybackCommandType.QUEUE_ADD && typeof payload.mode === 'string'
+          ? payload.mode
+          : 'end'
       if (command.type === PlaybackCommandType.QUEUE_ADD && !addedById) {
         throw new Error('Queue add command requires a creator')
       }
-      const queue =
-        command.type === PlaybackCommandType.QUEUE_ADD
-          ? await applyQueueAddCommand(tx, command.stationId, payload, addedById ?? '')
-          : command.type === PlaybackCommandType.QUEUE_REMOVE
-            ? await applyQueueRemoveCommand(tx, command.stationId, payload)
-            : await applyQueueReorderCommand(tx, command.stationId, payload)
+      if (command.type === PlaybackCommandType.QUEUE_ADD) {
+        await applyQueueAddCommand(tx, command.stationId, payload, addedById ?? '')
+      } else if (command.type === PlaybackCommandType.QUEUE_REMOVE) {
+        await applyQueueRemoveCommand(tx, command.stationId, payload)
+      } else {
+        await applyQueueReorderCommand(tx, command.stationId, payload)
+      }
+
+      if (command.type === PlaybackCommandType.QUEUE_ADD && queueAddMode === 'now') {
+        const switched = await applyQueuePlayNowTransition(tx, command.stationId, command.id, now)
+        if (switched) {
+          mediaAction = 'skip'
+        }
+      }
+
+      const queue = await snapshotQueueTx(tx, command.stationId)
 
       await tx.playbackCommand.update({
         where: { id: command.id },
@@ -1147,7 +1273,7 @@ async function applyCommand(command: {
       })
     })
 
-    return { mediaAction: undefined }
+    return { mediaAction }
   }
 
   await prisma.$transaction(async (tx) => {
@@ -1238,6 +1364,14 @@ async function applyCommand(command: {
       }
       nextShuffleEnabled = shuffleEnabled
     } else if (command.type === PlaybackCommandType.SKIP) {
+      if (nextLoopMode === PlaybackLoopMode.TRACK && nextTrackId) {
+        nextPosition = 0
+        nextPausedPosition = 0
+        nextTrackStartedAt = now
+        nextPaused = false
+        eventType = PlaybackEventType.TRACK_CHANGED
+        mediaAction = 'skip'
+      } else {
       if (nextQueueItemId) {
         await tx.queueItem.updateMany({
           where: { id: nextQueueItemId, status: QueueItemStatus.PLAYING },
@@ -1276,7 +1410,13 @@ async function applyCommand(command: {
         nextPaused = true
         eventType = PlaybackEventType.STATE_CHANGED
       }
+      }
     } else if (command.type === PlaybackCommandType.PREVIOUS) {
+      const currentItemId = nextQueueItemId
+      const currentTrackId = nextTrackId
+      const currentQueueType = nextQueueType
+      const currentDuration = nextDuration
+
       if (nextQueueItemId && nextQueueType) {
         await shiftPendingQueueRightTx(tx, command.stationId, nextQueueType, 0)
 
@@ -1292,7 +1432,7 @@ async function applyCommand(command: {
         await normalizePendingQueuePositionsTx(tx, command.stationId, nextQueueType)
       }
 
-      const previousItem = await resolvePreviousQueueItem(tx, command.stationId, state.currentQueueType)
+      const previousItem = await resolvePreviousQueueItem(tx, command.stationId)
       if (previousItem) {
         await tx.queueItem.update({
           where: { id: previousItem.id },
@@ -1312,6 +1452,23 @@ async function applyCommand(command: {
         nextPaused = false
         eventType = PlaybackEventType.TRACK_CHANGED
         mediaAction = 'skip'
+      } else if (currentItemId && currentTrackId && currentQueueType) {
+        await tx.queueItem.updateMany({
+          where: { id: currentItemId, status: QueueItemStatus.PENDING },
+          data: {
+            status: QueueItemStatus.PLAYING,
+            playedAt: null,
+          },
+        })
+
+        nextTrackId = currentTrackId
+        nextQueueItemId = currentItemId
+        nextQueueType = currentQueueType
+        nextDuration = currentDuration
+        nextPosition = 0
+        nextPausedPosition = 0
+        nextTrackStartedAt = now
+        nextPaused = false
       } else if (!nextTrackId) {
         const fallback = await resolveNextQueueItem(tx, command.stationId)
         if (fallback) {
@@ -1426,7 +1583,9 @@ async function reconcileEndedPlayback() {
         const result = await markTrackPlaybackTransition(tx, state.stationId, new Date())
         if (!result.changed) return
       })
-      await syncLiquidsoapStation(state.stationId)
+      if (await isBroadcastStation(state.stationId)) {
+        await syncLiquidsoapStation(state.stationId)
+      }
     } catch (error) {
       console.warn(
         `[${nowIso()}] failed to reconcile playback for station ${state.stationId}: ${safeMessage(error)}`,
@@ -1456,10 +1615,13 @@ async function runCommandLoop() {
           payload: claimed.payload,
           createdById: claimed.createdById,
         })
-        if (result.mediaAction) {
-          await syncLiquidsoapStation(claimed.stationId, result.mediaAction)
-        } else {
-          await syncLiquidsoapStation(claimed.stationId)
+        const isBroadcast = await isBroadcastStation(claimed.stationId)
+        if (isBroadcast) {
+          if (result.mediaAction) {
+            await syncLiquidsoapStation(claimed.stationId, result.mediaAction)
+          } else {
+            await syncLiquidsoapStation(claimed.stationId)
+          }
         }
       } catch (error) {
         const message = safeMessage(error)
@@ -1470,7 +1632,7 @@ async function runCommandLoop() {
       processed += 1
     }
   } catch (error) {
-    console.error(`[${nowIso()}] playout command loop error: ${safeMessage(error)}`)
+    console.error(`[${nowIso()}] playback command loop error: ${safeMessage(error)}`)
   } finally {
     commandPolling = false
   }
@@ -1482,7 +1644,7 @@ async function runReconcileLoop() {
   try {
     await reconcileEndedPlayback()
   } catch (error) {
-    console.error(`[${nowIso()}] playout reconcile loop error: ${safeMessage(error)}`)
+    console.error(`[${nowIso()}] playback reconcile loop error: ${safeMessage(error)}`)
   } finally {
     reconcilePolling = false
   }
@@ -1491,7 +1653,7 @@ async function runReconcileLoop() {
 async function shutdown() {
   if (stopped) return
   stopped = true
-  console.log(`[${nowIso()}] playout-worker stopping`)
+  console.log(`[${nowIso()}] playback-worker stopping`)
   try {
     await prisma.$disconnect()
   } finally {
@@ -1503,7 +1665,7 @@ async function bootstrap() {
   await prisma.$connect()
   await recoverStuckCommands()
 
-  console.log(`[${nowIso()}] playout-worker started`)
+  console.log(`[${nowIso()}] playback-worker started`)
   await ensureDirectory(LIQUIDSOAP_CONTROL_DIR)
   await ensureDirectory(LIQUIDSOAP_CACHE_DIR)
 
@@ -1516,7 +1678,7 @@ async function bootstrap() {
   }, Math.max(RECONCILE_INTERVAL_MS, 1000))
 
   setInterval(() => {
-    console.log(`[${nowIso()}] playout-worker heartbeat`)
+    console.log(`[${nowIso()}] playback-worker heartbeat`)
   }, Math.max(HEARTBEAT_INTERVAL_MS, 5_000))
 
   await runCommandLoop()
@@ -1532,7 +1694,7 @@ process.on('SIGTERM', () => {
 })
 
 void bootstrap().catch(async (error) => {
-  console.error(`[${nowIso()}] playout-worker bootstrap failed: ${safeMessage(error)}`)
+  console.error(`[${nowIso()}] playback-worker bootstrap failed: ${safeMessage(error)}`)
   await prisma.$disconnect()
   process.exit(1)
 })

@@ -5,8 +5,9 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Upload, CheckCircle2, AlertCircle, Music2, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import api from '@/lib/api'
+import { SUPPORTED_EXTENSIONS } from '@web-radio/shared'
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:3001/api'
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 
 interface UploadFile {
   id: string
@@ -23,6 +24,26 @@ interface UploadModalProps {
   onUploaded?: () => void
 }
 
+const FALLBACK_BINARY_MIME_TYPES = new Set([
+  '',
+  'application/octet-stream',
+  'binary/octet-stream',
+])
+
+function getFileExtension(name: string) {
+  const dot = name.lastIndexOf('.')
+  if (dot < 0) return ''
+  return name.slice(dot).toLowerCase()
+}
+
+function isSupportedAudioUploadFile(file: File) {
+  const ext = getFileExtension(file.name)
+  const mime = String(file.type ?? '').trim().toLowerCase()
+  const isExtAllowed = SUPPORTED_EXTENSIONS.includes(ext)
+  if (!isExtAllowed) return false
+  return mime.startsWith('audio/') || FALLBACK_BINARY_MIME_TYPES.has(mime)
+}
+
 export function UploadModal({ stationId, playlistId, onClose, onUploaded }: UploadModalProps) {
   const [files, setFiles] = useState<UploadFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
@@ -30,7 +51,7 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
   const activeUploads = useRef(0)
 
   const addFiles = useCallback((raw: FileList | File[]) => {
-    const audio = Array.from(raw).filter((f) => f.type.startsWith('audio/'))
+    const audio = Array.from(raw).filter(isSupportedAudioUploadFile)
     setFiles((prev) => [
       ...prev,
       ...audio.map((file) => ({

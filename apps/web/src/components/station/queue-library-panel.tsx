@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -38,9 +38,17 @@ import {
   Folder,
   Search,
   X,
+  Check,
 } from "lucide-react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001/api";
+
+function getApiErrorMessage(error: unknown, fallback: string) {
+  const message = (error as any)?.response?.data?.message;
+  if (Array.isArray(message)) return message.join(", ");
+  if (typeof message === "string" && message.trim().length > 0) return message;
+  return fallback;
+}
 
 interface Playlist {
   id: string;
@@ -61,6 +69,9 @@ interface LibraryTrack {
   sortOrder: number;
 }
 
+const EMPTY_PLAYLISTS: Playlist[] = [];
+const EMPTY_LIBRARY_TRACKS: LibraryTrack[] = [];
+
 interface QueueLibraryPanelProps {
   stationId: string;
   activePlaylistId: string | null;
@@ -72,7 +83,7 @@ interface QueueLibraryPanelProps {
   onAddToQueue: (
     trackId: string,
     options?: { mode?: "end" | "next" | "now"; beforeItemId?: string },
-  ) => void;
+  ) => Promise<void> | void;
   onRemoveFromQueue: (itemId: string) => void;
   onActivePlaylistChange?: (playlistId: string) => void;
   onOpenFolderManage?: (playlistId: string) => void;
@@ -138,6 +149,7 @@ function QueueTrackMenu({
   return (
     <motion.div
       ref={ref}
+      onClick={(e) => e.stopPropagation()}
       initial={{ opacity: 0, scale: 0.95, y: -4 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: 0.95, y: -4 }}
@@ -165,43 +177,95 @@ function FolderArtwork({
   active = false,
   open = false,
   color = "orange",
+  previewCovers = [],
 }: {
   active?: boolean;
   open?: boolean;
   color?: FolderColorKey;
+  previewCovers?: string[];
 }) {
   const palette = FOLDER_PALETTE[color] ?? FOLDER_PALETTE.orange;
-  const tabBackground = active
-    ? palette.tab
-    : "linear-gradient(180deg, #B0B0B0 0%, #818181 100%)";
-  const backPlateBackground = active
-    ? palette.back
-    : "linear-gradient(180deg, #A2A2A2 0%, #6F6F6F 100%)";
-  const frontPlateBackground = active
-    ? palette.front
-    : "linear-gradient(180deg, #969696 0%, #767676 68%, #5E5E5E 100%)";
+  const tabInactive = "linear-gradient(180deg, #B0B0B0 0%, #818181 100%)";
+  const backInactive = "linear-gradient(180deg, #A2A2A2 0%, #6F6F6F 100%)";
+  const frontInactive = "linear-gradient(180deg, #969696 0%, #767676 68%, #5E5E5E 100%)";
+  const cleanCovers = previewCovers.filter(Boolean);
+  const sheetSources: Array<string | null> =
+    cleanCovers.length >= 3
+      ? cleanCovers.slice(0, 3)
+      : cleanCovers.length === 2
+        ? cleanCovers
+        : cleanCovers.length === 1
+          ? [cleanCovers[0], null]
+          : [null, null];
 
   return (
     <div
       className="relative w-[120px] h-[86px] mx-auto overflow-visible"
       style={{ perspective: 700 }}
     >
+      {open &&
+        sheetSources.map((coverUrl, idx) => {
+          const transforms = [
+            { x: -16, y: 10, rotate: -12 },
+            { x: -2, y: 4, rotate: -3 },
+            { x: 14, y: 10, rotate: 8 },
+          ];
+          const t = transforms[idx] ?? transforms[0];
+
+          return (
+            <motion.div
+              key={`folder-sheet-${idx}-${coverUrl ?? "empty"}`}
+              className="absolute left-1/2 top-1 w-7 h-7 rounded-[6px] overflow-hidden border pointer-events-none"
+              style={{
+                zIndex: 1 + idx,
+                borderColor: "rgba(255,255,255,0.58)",
+                boxShadow: "0 5px 12px rgba(0,0,0,0.2)",
+                background: "rgba(255,255,255,0.95)",
+              }}
+              initial={{ opacity: 0, y: t.y + 4, x: t.x, rotate: t.rotate }}
+              animate={{ opacity: 1, y: t.y, x: t.x, rotate: t.rotate }}
+              exit={{ opacity: 0, y: t.y + 4, x: t.x, rotate: t.rotate }}
+              transition={{ duration: 0.22, ease: "easeOut", delay: idx * 0.03 }}
+            >
+              {coverUrl ? (
+                <img src={coverUrl} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center bg-white">
+                  <Music2 size={11} className="text-[--text-muted]" />
+                </div>
+              )}
+            </motion.div>
+          );
+        })}
+
       <motion.div
         className="absolute left-9 top-2 w-16 h-5 rounded-t-[6px]"
         animate={{ y: 0, rotate: 0 }}
         transition={{ duration: 0.2, ease: "easeOut" }}
-        style={{
-          background: tabBackground,
-          boxShadow: "none",
-        }}
-      />
+      >
+        <div
+          className="absolute inset-0 rounded-t-[6px]"
+          style={{ background: tabInactive, boxShadow: "none" }}
+        />
+        <motion.div
+          className="absolute inset-0 rounded-t-[6px]"
+          style={{ background: palette.tab, boxShadow: "none" }}
+          animate={{ opacity: active ? 1 : 0 }}
+          transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+        />
+      </motion.div>
       {/* Back plate: stays in place */}
       <div
         className="absolute left-4 right-4 top-5 h-[58px] rounded-[8px]"
-        style={{
-          background: backPlateBackground,
-        }}
-      />
+      >
+        <div className="absolute inset-0 rounded-[8px]" style={{ background: backInactive }} />
+        <motion.div
+          className="absolute inset-0 rounded-[8px]"
+          style={{ background: palette.back }}
+          animate={{ opacity: active ? 1 : 0 }}
+          transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+        />
+      </div>
       {/* Front plate: opens in perspective, upper-left corner goes deeper */}
       <motion.div
         className="absolute left-4 right-4 top-5 h-[58px] rounded-[8px]"
@@ -216,17 +280,24 @@ function FolderArtwork({
         style={{
           transformOrigin: "right bottom",
           transformStyle: "preserve-3d",
-          background: frontPlateBackground,
         }}
       >
+        <div className="absolute inset-0 rounded-[8px]" style={{ background: frontInactive }} />
+        <motion.div
+          className="absolute inset-0 rounded-[8px]"
+          style={{ background: palette.front }}
+          animate={{ opacity: active ? 1 : 0 }}
+          transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+        />
         <div
           className="absolute inset-x-5 top-7 h-3 rounded-[2px]"
-          style={{
-            background: active
-              ? "rgba(255,255,255,0.12)"
-              : "rgba(255,255,255,0.09)",
-            boxShadow: "none",
-          }}
+          style={{ background: "rgba(255,255,255,0.09)", boxShadow: "none" }}
+        />
+        <motion.div
+          className="absolute inset-x-5 top-7 h-3 rounded-[2px]"
+          style={{ background: "rgba(255,255,255,0.12)", boxShadow: "none" }}
+          animate={{ opacity: active ? 1 : 0 }}
+          transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
         />
         <div
           className="absolute inset-x-0 bottom-0 h-2 rounded-b-[8px]"
@@ -247,6 +318,7 @@ function DraggableFolderChip({
   onClick,
   color,
   onOpenSettings,
+  previewCovers,
 }: {
   playlist: Playlist;
   isActive: boolean;
@@ -254,16 +326,44 @@ function DraggableFolderChip({
   onClick: () => void;
   color: FolderColorKey;
   onOpenSettings: () => void;
+  previewCovers?: string[];
 }) {
   const [isHover, setIsHover] = useState(false);
+  const [hoverPush, setHoverPush] = useState({ x: 0, y: 0 });
   const showGear = isHover;
+
+  const handleMouseLeave = () => {
+    setIsHover(false);
+    setHoverPush({ x: 0, y: 0 });
+  };
+
+  const handleMouseMove = (e: any) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const normX = Math.max(
+      -1,
+      Math.min(1, (e.clientX - centerX) / (rect.width * 0.5)),
+    );
+    const normY = Math.max(
+      -1,
+      Math.min(1, (e.clientY - centerY) / (rect.height * 0.5)),
+    );
+
+    // Move in the opposite direction of the cursor to create a soft "avoid" effect.
+    setHoverPush({
+      x: -normX * 6,
+      y: -normY * 4,
+    });
+  };
 
   return (
     <div className="relative shrink-0 w-[172px]">
       <button
         onClick={onClick}
         onMouseEnter={() => setIsHover(true)}
-        onMouseLeave={() => setIsHover(false)}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
         className="w-full p-1 text-center transition-colors rounded-xl"
       >
         <AnimatePresence>
@@ -292,11 +392,35 @@ function DraggableFolderChip({
             </motion.div>
           )}
         </AnimatePresence>
-        <FolderArtwork
-          active={isActive}
-          open={isViewed || isHover}
-          color={color}
-        />
+        <motion.div
+          animate={{ x: hoverPush.x, y: hoverPush.y }}
+          transition={{ type: "spring", stiffness: 210, damping: 17, mass: 0.68 }}
+          className="inline-block"
+        >
+          <motion.div
+            animate={
+              isHover
+                ? {
+                    rotate: [0, 1.15, -0.9, 0.7, -0.35, 0],
+                    scale: [1, 1.01, 1, 1.006, 1],
+                  }
+                : { rotate: 0, scale: 1 }
+            }
+            transition={
+              isHover
+                ? { duration: 2.2, repeat: Infinity, ease: "easeInOut" }
+                : { duration: 0.22, ease: "easeOut" }
+            }
+            style={{ transformOrigin: "50% 62%" }}
+          >
+            <FolderArtwork
+              active={isViewed}
+              open={isViewed || isHover}
+              color={isViewed ? "orange" : color}
+              previewCovers={previewCovers}
+            />
+          </motion.div>
+        </motion.div>
         <p
           className={`text-[18px] font-semibold mt-1.5 leading-tight truncate ${isViewed ? "text-[--text-primary]" : "text-[--text-secondary]"}`}
         >
@@ -507,6 +631,10 @@ function SortableLibraryRow({
   index,
   isCurrentTrack,
   canReorder,
+  canSelect,
+  isSelected,
+  selectionDisabled,
+  onToggleSelect,
   canMenu,
   onMenuAction,
   menuOpen,
@@ -517,12 +645,17 @@ function SortableLibraryRow({
   index: number;
   isCurrentTrack: boolean;
   canReorder: boolean;
+  canSelect: boolean;
+  isSelected: boolean;
+  selectionDisabled: boolean;
+  onToggleSelect: (trackId: string) => void;
   canMenu: boolean;
   onMenuAction: (mode: "end" | "next" | "now") => void;
   menuOpen: boolean;
   onOpenMenu: () => void;
   onCloseMenu: () => void;
 }) {
+  const [isHoveringRow, setIsHoveringRow] = useState(false);
   const {
     attributes,
     listeners,
@@ -538,17 +671,50 @@ function SortableLibraryRow({
   const coverUrl = track.hasCover
     ? `${API_URL}/tracks/${track.id}/cover`
     : null;
+  const showCheckbox = canSelect && (isSelected || isHoveringRow);
 
   return (
     <div
       ref={setNodeRef}
+      onMouseEnter={() => setIsHoveringRow(true)}
+      onMouseLeave={() => setIsHoveringRow(false)}
       style={{
         transform: CSS.Transform.toString(transform),
         transition,
         opacity: isDragging ? 0.5 : 1,
       }}
-      className="relative flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2.5 rounded-xl hover:bg-[--bg-subtle] transition-colors"
+      className={`relative flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2.5 rounded-xl transition-colors ${
+        isSelected ? "bg-[--color-accent-muted]" : "hover:bg-[--bg-subtle]"
+      }`}
     >
+      <motion.div
+        initial={false}
+        animate={{
+          opacity: showCheckbox ? 1 : 0,
+          x: showCheckbox ? 0 : -10,
+          width: showCheckbox ? 16 : 0,
+          marginRight: showCheckbox ? 0 : -6,
+        }}
+        transition={{ duration: 0.16, ease: "easeOut" }}
+        className="overflow-hidden"
+        style={{ pointerEvents: showCheckbox ? "auto" : "none" }}
+      >
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSelect(track.id);
+          }}
+          disabled={selectionDisabled || !showCheckbox}
+          tabIndex={showCheckbox ? 0 : -1}
+          className="w-4 h-4 rounded-[4px] flex items-center justify-center border border-[--border] text-[--text-primary] bg-[--bg] hover:border-[--color-accent] disabled:opacity-60 disabled:cursor-not-allowed"
+          title={isSelected ? "Unselect track" : "Select track"}
+          aria-label={isSelected ? "Unselect track" : "Select track"}
+        >
+          {isSelected && <Check size={10} className="text-[--color-accent]" />}
+        </button>
+      </motion.div>
+
       <span className="w-5 flex items-center justify-end">
         <span
           className={`inline-flex min-w-[18px] h-[18px] items-center justify-center rounded-md text-xs font-semibold tabular-nums ${
@@ -563,6 +729,7 @@ function SortableLibraryRow({
         <button
           {...attributes}
           {...listeners}
+          onClick={(e) => e.stopPropagation()}
           disabled={!canReorder}
           className="text-[--text-muted] hover:text-[--text-secondary] cursor-grab active:cursor-grabbing"
         >
@@ -599,8 +766,11 @@ function SortableLibraryRow({
 
       <div className="relative">
         <button
-          onClick={onOpenMenu}
-          disabled={!canMenu}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenMenu();
+          }}
+          disabled={!canMenu || selectionDisabled}
           className="w-7 h-7 rounded-lg flex items-center justify-center text-[--text-muted] hover:text-[--text-primary] hover:bg-[--bg-subtle]"
         >
           <MoreHorizontal size={14} />
@@ -637,6 +807,9 @@ export function QueueLibraryPanel({
   const [folderColors, setFolderColors] = useState<
     Record<string, FolderColorKey>
   >({});
+  const [selectedTrackIds, setSelectedTrackIds] = useState<string[]>([]);
+  const [isBulkActionPending, setIsBulkActionPending] = useState(false);
+  const [bulkActionError, setBulkActionError] = useState<string | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -649,7 +822,7 @@ export function QueueLibraryPanel({
     id: "queue-drop-end",
   });
 
-  const { data: playlists = [], isLoading: playlistsLoading } = useQuery<
+  const { data: playlistsData, isLoading: playlistsLoading } = useQuery<
     Playlist[]
   >({
     queryKey: ["playlists", stationId],
@@ -657,28 +830,27 @@ export function QueueLibraryPanel({
       api.get(`/stations/${stationId}/playlists`).then((r) => r.data),
     enabled: !!stationId,
   });
+  const playlists = playlistsData ?? EMPTY_PLAYLISTS;
   useEffect(() => {
-    if (!playlists.length) {
-      setCurrentPlaylistId(null);
-      return;
-    }
+    setCurrentPlaylistId((prev) => {
+      if (!playlists.length) {
+        return prev === null ? prev : null;
+      }
 
-    if (!currentPlaylistId) {
-      setCurrentPlaylistId(activePlaylistId ?? playlists[0].id);
-      return;
-    }
+      if (prev && playlists.some((playlist) => playlist.id === prev)) {
+        return prev;
+      }
 
-    const exists = playlists.some(
-      (playlist) => playlist.id === currentPlaylistId,
-    );
-    if (!exists) {
-      setCurrentPlaylistId(activePlaylistId ?? playlists[0].id);
-    }
-  }, [playlists, currentPlaylistId, activePlaylistId]);
+      const next = activePlaylistId ?? playlists[0].id;
+      return prev === next ? prev : next;
+    });
+  }, [playlists, activePlaylistId]);
 
   useEffect(() => {
     setTrackSearch("");
     setOpenMenuTrackId(null);
+    setSelectedTrackIds([]);
+    setBulkActionError(null);
   }, [currentPlaylistId]);
 
   useEffect(() => {
@@ -701,7 +873,7 @@ export function QueueLibraryPanel({
     );
   }, [stationId, folderColors]);
 
-  const { data: playlistTracks = [], isLoading: tracksLoading } = useQuery<
+  const { data: playlistTracksData, isLoading: tracksLoading } = useQuery<
     LibraryTrack[]
   >({
     queryKey: ["playlist-tracks", currentPlaylistId],
@@ -709,6 +881,15 @@ export function QueueLibraryPanel({
       api.get(`/playlists/${currentPlaylistId}/tracks`).then((r) => r.data),
     enabled: !!currentPlaylistId,
   });
+  const playlistTracks = playlistTracksData ?? EMPTY_LIBRARY_TRACKS;
+  const currentFolderCoverUrls = useMemo(
+    () =>
+      playlistTracks
+        .filter((track) => track.hasCover)
+        .slice(0, 3)
+        .map((track) => `${API_URL}/tracks/${track.id}/cover`),
+    [playlistTracks],
+  );
 
   const createFolderMutation = useMutation({
     mutationFn: (name: string) =>
@@ -790,9 +971,101 @@ export function QueueLibraryPanel({
     });
   }, [displayTracks, normalizedTrackSearch]);
 
+  const selectableTrackIds = useMemo(
+    () => new Set(displayTracks.map((track) => track.id)),
+    [displayTracks],
+  );
+
+  useEffect(() => {
+    setSelectedTrackIds((prev) => {
+      if (!prev.length) return prev;
+      const next = prev.filter((trackId) => selectableTrackIds.has(trackId));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [selectableTrackIds]);
+
+  const selectedTrackIdSet = useMemo(
+    () => new Set(selectedTrackIds),
+    [selectedTrackIds],
+  );
+  const visibleTrackIds = useMemo(
+    () => filteredTracks.map((track) => track.id),
+    [filteredTracks],
+  );
+  const selectedVisibleCount = useMemo(
+    () =>
+      visibleTrackIds.reduce(
+        (count, trackId) => (selectedTrackIdSet.has(trackId) ? count + 1 : count),
+        0,
+      ),
+    [visibleTrackIds, selectedTrackIdSet],
+  );
+  const allVisibleSelected =
+    visibleTrackIds.length > 0 && selectedVisibleCount === visibleTrackIds.length;
+  const hasSelectedTracks = selectedTrackIds.length > 0;
+
   const handleFolderClick = (playlist: Playlist) => {
     setCurrentPlaylistId(playlist.id);
   };
+
+  const handleToggleTrackSelection = useCallback((trackId: string) => {
+    setBulkActionError(null);
+    setSelectedTrackIds((prev) =>
+      prev.includes(trackId)
+        ? prev.filter((id) => id !== trackId)
+        : [...prev, trackId],
+    );
+  }, []);
+
+  const handleToggleVisibleSelection = useCallback(() => {
+    setBulkActionError(null);
+    setSelectedTrackIds((prev) => {
+      const next = new Set(prev);
+      const shouldSelectAllVisible = visibleTrackIds.some((id) => !next.has(id));
+
+      if (shouldSelectAllVisible) {
+        visibleTrackIds.forEach((id) => next.add(id));
+      } else {
+        visibleTrackIds.forEach((id) => next.delete(id));
+      }
+
+      return Array.from(next);
+    });
+  }, [visibleTrackIds]);
+
+  const handleBulkQueueAction = useCallback(
+    async (mode: "end" | "next" | "now") => {
+      if (!selectedTrackIds.length || isBulkActionPending) return;
+
+      const selectedIds = new Set(selectedTrackIds);
+      const orderedSelection = displayTracks
+        .filter((track) => selectedIds.has(track.id))
+        .map((track) => track.id);
+      if (!orderedSelection.length) return;
+
+      const queueOrder =
+        mode === "end" ? orderedSelection : [...orderedSelection].reverse();
+
+      setBulkActionError(null);
+      setOpenMenuTrackId(null);
+      setIsBulkActionPending(true);
+      try {
+        for (const trackId of queueOrder) {
+          // Keep requests ordered so queue insertion order stays predictable.
+          // eslint-disable-next-line no-await-in-loop
+          await Promise.resolve(onAddToQueue(trackId, { mode }));
+        }
+        setSelectedTrackIds([]);
+      } catch (error) {
+        setBulkActionError(
+          getApiErrorMessage(error, "Couldn't run bulk action. Try again."),
+        );
+      } finally {
+        setIsBulkActionPending(false);
+      }
+    },
+    [displayTracks, isBulkActionPending, onAddToQueue, selectedTrackIds],
+  );
 
   const queueSortableIds = userQueue.map((item) => `queue-${item.id}`);
   const libSortableIds = filteredTracks.map((track) => `lib-${track.id}`);
@@ -939,6 +1212,11 @@ export function QueueLibraryPanel({
                   onClick={() => handleFolderClick(playlist)}
                   color={folderColors[playlist.id] ?? "orange"}
                   onOpenSettings={() => onOpenFolderManage?.(playlist.id)}
+                  previewCovers={
+                    playlist.id === currentPlaylistId
+                      ? currentFolderCoverUrls
+                      : undefined
+                  }
                 />
               ))}
             </div>
@@ -951,6 +1229,63 @@ export function QueueLibraryPanel({
               border: "1px solid var(--border)",
             }}
           >
+            {canControl && hasSelectedTracks && (
+              <div
+                className="mb-2 pb-2"
+                style={{
+                  borderBottom: "1px solid rgba(128, 128, 128, 0.18)",
+                }}
+              >
+                <div className="flex flex-wrap items-center gap-2 pl-1.5 md:pl-2.5">
+                  <button
+                    type="button"
+                    onClick={handleToggleVisibleSelection}
+                    disabled={!filteredTracks.length || isBulkActionPending}
+                    className="w-4 h-4 rounded-[4px] flex items-center justify-center border border-[--border] text-[--text-primary] bg-[--bg] hover:border-[--color-accent] disabled:opacity-60 disabled:cursor-not-allowed"
+                    title={
+                      allVisibleSelected
+                        ? "Unselect visible tracks"
+                        : "Select visible tracks"
+                    }
+                  >
+                    {allVisibleSelected && (
+                      <Check size={10} className="text-[--color-accent]" />
+                    )}
+                  </button>
+
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!hasSelectedTracks || isBulkActionPending}
+                    isLoading={isBulkActionPending}
+                    onClick={() => handleBulkQueueAction("end")}
+                  >
+                    Add selected to end
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!hasSelectedTracks || isBulkActionPending}
+                    isLoading={isBulkActionPending}
+                    onClick={() => handleBulkQueueAction("next")}
+                  >
+                    Play selected next
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={!hasSelectedTracks || isBulkActionPending}
+                    isLoading={isBulkActionPending}
+                    onClick={() => handleBulkQueueAction("now")}
+                  >
+                    Play selected now
+                  </Button>
+                </div>
+                {bulkActionError && (
+                  <p className="mt-2 text-xs text-red-500">{bulkActionError}</p>
+                )}
+              </div>
+            )}
+
             {tracksLoading ? (
               <div className="flex justify-center py-8">
                 <div className="w-5 h-5 border-2 border-[--color-accent] border-t-transparent rounded-full animate-spin" />
@@ -966,31 +1301,37 @@ export function QueueLibraryPanel({
                 <p className="text-sm">No tracks found</p>
               </div>
             ) : (
-              <SortableContext
-                items={libSortableIds}
-                strategy={verticalListSortingStrategy}
-              >
-                <div className="space-y-1">
-                  {filteredTracks.map((track, idx) => (
-                    <SortableLibraryRow
-                      key={track.id}
-                      track={track}
-                      index={idx + 1}
-                      isCurrentTrack={track.id === currentTrackId}
-                      canReorder={false}
-                      canMenu={canControl}
-                      menuOpen={openMenuTrackId === track.id}
-                      onOpenMenu={() =>
-                        setOpenMenuTrackId(
-                          openMenuTrackId === track.id ? null : track.id,
-                        )
-                      }
-                      onCloseMenu={() => setOpenMenuTrackId(null)}
-                      onMenuAction={(mode) => onAddToQueue(track.id, { mode })}
-                    />
-                  ))}
-                </div>
-              </SortableContext>
+              <div className="relative">
+                <SortableContext
+                  items={libSortableIds}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className="space-y-1">
+                    {filteredTracks.map((track, idx) => (
+                      <SortableLibraryRow
+                        key={track.id}
+                        track={track}
+                        index={idx + 1}
+                        isCurrentTrack={track.id === currentTrackId}
+                        canReorder={false}
+                        canSelect={canControl}
+                        isSelected={selectedTrackIdSet.has(track.id)}
+                        selectionDisabled={isBulkActionPending}
+                        onToggleSelect={handleToggleTrackSelection}
+                        canMenu={canControl}
+                        menuOpen={openMenuTrackId === track.id}
+                        onOpenMenu={() =>
+                          setOpenMenuTrackId(
+                            openMenuTrackId === track.id ? null : track.id,
+                          )
+                        }
+                        onCloseMenu={() => setOpenMenuTrackId(null)}
+                        onMenuAction={(mode) => onAddToQueue(track.id, { mode })}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+              </div>
             )}
           </div>
 

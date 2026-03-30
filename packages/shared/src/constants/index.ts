@@ -7,11 +7,20 @@ export const USER_STORAGE_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
 
 export const SUPPORTED_AUDIO_FORMATS = [
   'audio/mpeg',        // mp3
+  'audio/mp3',         // mp3 (alias)
+  'audio/x-mp3',       // mp3 (legacy alias)
+  'audio/mpeg3',       // mp3 (legacy alias)
   'audio/flac',        // flac
+  'audio/x-flac',      // flac (alias)
   'audio/wav',         // wav
+  'audio/wave',        // wav (alias)
+  'audio/vnd.wave',    // wav (alias)
   'audio/x-wav',       // wav
   'audio/aac',         // aac
+  'audio/x-aac',       // aac (alias)
   'audio/ogg',         // ogg
+  'application/ogg',   // ogg (alias)
+  'audio/opus',        // opus
   'audio/mp4',         // m4a
   'audio/x-m4a',       // m4a
 ]

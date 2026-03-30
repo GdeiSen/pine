@@ -15,6 +15,9 @@ RUN pnpm install --frozen-lockfile
 
 FROM deps AS build
 
+ARG NEXT_PUBLIC_APP_DEPLOYMENT_MODE=hybrid
+ENV NEXT_PUBLIC_APP_DEPLOYMENT_MODE=$NEXT_PUBLIC_APP_DEPLOYMENT_MODE
+
 COPY . .
 
 RUN pnpm --filter @web-radio/shared build
@@ -23,6 +26,8 @@ RUN pnpm --filter @web-radio/web build
 FROM base AS runtime
 
 ENV NODE_ENV=production
+ARG NEXT_PUBLIC_APP_DEPLOYMENT_MODE=hybrid
+ENV NEXT_PUBLIC_APP_DEPLOYMENT_MODE=$NEXT_PUBLIC_APP_DEPLOYMENT_MODE
 
 WORKDIR /app
 COPY --from=build /app /app

@@ -60,68 +60,6 @@ services:
         mc anonymous set private "local/$$MINIO_BUCKET_COVERS" || true;
         mc anonymous set private "local/$$MINIO_BUCKET_TRANSCODES" || true;
 
-  icecast:
-    image: libretime/icecast:latest
-    restart: unless-stopped
-    environment:
-      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-change_me_source_password}
-      ICECAST_ADMIN_PASSWORD: ${ICECAST_ADMIN_PASSWORD:-change_me_admin_password}
-      ICECAST_RELAY_PASSWORD: ${ICECAST_RELAY_PASSWORD:-change_me_relay_password}
-      ICECAST_HOSTNAME: ${ICECAST_HOSTNAME:-localhost}
-      ICECAST_MOUNT: ${ICECAST_MOUNT:-/live.mp3}
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        sed \
-          -e "s|__ICECAST_SOURCE_PASSWORD__|${ICECAST_SOURCE_PASSWORD:-change_me_source_password}|g" \
-          -e "s|__ICECAST_ADMIN_PASSWORD__|${ICECAST_ADMIN_PASSWORD:-change_me_admin_password}|g" \
-          -e "s|__ICECAST_RELAY_PASSWORD__|${ICECAST_RELAY_PASSWORD:-change_me_relay_password}|g" \
-          -e "s|__ICECAST_HOSTNAME__|${ICECAST_HOSTNAME:-localhost}|g" \
-          -e "s|__ICECAST_MOUNT__|${ICECAST_MOUNT:-/live.mp3}|g" \
-          /etc/icecast/icecast.xml.tmpl > /tmp/icecast.xml
-        exec icecast -c /tmp/icecast.xml
-    ports:
-      - "${ICECAST_PORT:-8000}:8000"
-    volumes:
-      - ./icecast/icecast.xml:/etc/icecast/icecast.xml.tmpl:ro
-      - icecast_logs:/var/log/icecast
-
-  liquidsoap:
-    image: ghcr.io/savonet/liquidsoap:v2.3.3
-    user: "0:0"
-    restart: unless-stopped
-    depends_on:
-      - icecast
-    environment:
-      ICECAST_HOST: ${ICECAST_HOST:-icecast}
-      ICECAST_PORT: ${ICECAST_PORT_INTERNAL:-8000}
-      ICECAST_SOURCE_PASSWORD: ${ICECAST_SOURCE_PASSWORD:-change_me_source_password}
-      ICECAST_MOUNT: ${ICECAST_MOUNT:-/live.mp3}
-      LIQUIDSOAP_SOURCE_NAME: ${LIQUIDSOAP_SOURCE_NAME:-PINE Radio}
-      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
-      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
-      LIQUIDSOAP_TELNET_PORT: ${LIQUIDSOAP_TELNET_PORT:-1234}
-    volumes:
-      - ./liquidsoap/radio.liq:/etc/liquidsoap/radio.liq.tmpl:ro
-      - liquidsoap_control:/var/lib/liquidsoap/control
-      - liquidsoap_cache:/var/lib/liquidsoap/cache
-    entrypoint: ["/bin/sh"]
-    command:
-      - -ec
-      - |
-        mkdir -p /var/lib/liquidsoap/control /var/lib/liquidsoap/cache;
-        touch /var/lib/liquidsoap/control/playlist.m3u;
-        sed \
-          -e "s|__LIQUIDSOAP_SOURCE_NAME__|${LIQUIDSOAP_SOURCE_NAME:-PINE Radio}|g" \
-          -e "s|__ICECAST_HOST__|${ICECAST_HOST:-icecast}|g" \
-          -e "s|__ICECAST_PORT__|${ICECAST_PORT_INTERNAL:-8000}|g" \
-          -e "s|__ICECAST_SOURCE_PASSWORD__|${ICECAST_SOURCE_PASSWORD:-change_me_source_password}|g" \
-          -e "s|__ICECAST_MOUNT__|${ICECAST_MOUNT:-/live.mp3}|g" \
-          -e "s|__LIQUIDSOAP_TELNET_PORT__|${LIQUIDSOAP_TELNET_PORT:-1234}|g" \
-          /etc/liquidsoap/radio.liq.tmpl > /tmp/radio.liq;
-        exec liquidsoap /tmp/radio.liq;
-
   api:
     image: pine-api:dev
     restart: unless-stopped
@@ -133,7 +71,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
-      APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-hybrid}
+      APP_DEPLOYMENT_MODE: direct
       DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
       JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_please_change_32_chars_minimum_123456}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_jwt_refresh_secret_please_change_32_chars_abcdef}
@@ -152,10 +90,6 @@ services:
       MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
       MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
       MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
-      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
-      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
-      LIQUIDSOAP_TELNET_HOST: ${LIQUIDSOAP_TELNET_HOST:-liquidsoap}
-      LIQUIDSOAP_TELNET_PORT: ${LIQUIDSOAP_TELNET_PORT:-1234}
     ports:
       - "${API_PORT:-3001}:3001"
     volumes:
@@ -167,8 +101,6 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-      icecast:
-        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/health/ready >/dev/null || exit 1"]
       interval: 10s
@@ -185,7 +117,7 @@ services:
     command: ["pnpm", "start:playback-worker"]
     environment:
       NODE_ENV: production
-      APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-hybrid}
+      APP_DEPLOYMENT_MODE: direct
       DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
       STORAGE_PATH: /data/storage
       PLAYBACK_POLL_INTERVAL_MS: ${PLAYBACK_POLL_INTERVAL_MS:-500}
@@ -197,14 +129,8 @@ services:
       MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
       MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
       MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
-      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
-      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
-      LIQUIDSOAP_TELNET_HOST: ${LIQUIDSOAP_TELNET_HOST:-liquidsoap}
-      LIQUIDSOAP_TELNET_PORT: ${LIQUIDSOAP_TELNET_PORT:-1234}
     volumes:
       - api_storage:/data/storage
-      - liquidsoap_control:/var/lib/liquidsoap/control
-      - liquidsoap_cache:/var/lib/liquidsoap/cache
     depends_on:
       api:
         condition: service_healthy
@@ -221,7 +147,7 @@ services:
     command: ["pnpm", "start:media-worker"]
     environment:
       NODE_ENV: production
-      APP_DEPLOYMENT_MODE: ${APP_DEPLOYMENT_MODE:-hybrid}
+      APP_DEPLOYMENT_MODE: direct
       DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
       STORAGE_PATH: /data/storage
       MEDIA_POLL_INTERVAL_MS: ${MEDIA_POLL_INTERVAL_MS:-1500}
@@ -233,8 +159,6 @@ services:
       MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
       MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
       MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
-      LIQUIDSOAP_CONTROL_DIR: ${LIQUIDSOAP_CONTROL_DIR:-/var/lib/liquidsoap/control}
-      LIQUIDSOAP_CACHE_DIR: ${LIQUIDSOAP_CACHE_DIR:-/var/lib/liquidsoap/cache}
     volumes:
       - api_storage:/data/storage
     depends_on:
@@ -251,7 +175,7 @@ services:
       dockerfile: apps/web/Dockerfile
       target: runtime
       args:
-        NEXT_PUBLIC_APP_DEPLOYMENT_MODE: ${NEXT_PUBLIC_APP_DEPLOYMENT_MODE:-hybrid}
+        NEXT_PUBLIC_APP_DEPLOYMENT_MODE: direct
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
@@ -259,7 +183,7 @@ services:
       NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-PINE}
       NEXT_PUBLIC_STREAM_URL: ${NEXT_PUBLIC_STREAM_URL:-http://localhost:8000/live.mp3}
       BACKEND_PROXY_TARGET: ${BACKEND_PROXY_TARGET:-http://api:3001}
-      NEXT_PUBLIC_APP_DEPLOYMENT_MODE: ${NEXT_PUBLIC_APP_DEPLOYMENT_MODE:-hybrid}
+      NEXT_PUBLIC_APP_DEPLOYMENT_MODE: direct
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
@@ -277,15 +201,13 @@ services:
     ports:
       - "${NGINX_HTTP_PORT:-80}:80"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx.direct.conf:/etc/nginx/nginx.conf:ro
       - nginx_logs:/var/log/nginx
     depends_on:
       web:
         condition: service_healthy
       api:
         condition: service_healthy
-      icecast:
-        condition: service_started
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/nginx-health >/dev/null || exit 1"]
       interval: 10s
@@ -295,8 +217,5 @@ services:
 volumes:
   postgres_data:
   minio_data:
-  icecast_logs:
-  liquidsoap_control:
-  liquidsoap_cache:
   api_storage:
   nginx_logs:

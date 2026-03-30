@@ -1,9 +1,12 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common'
-import { PlaybackEventType as PrismaPlaybackEventType, Prisma } from '@prisma/client'
+import {
+  PlaybackEventType as PrismaPlaybackEventType,
+  PlaybackLoopMode,
+  Prisma,
+} from '@prisma/client'
 import { WS_EVENTS_V2 } from '@web-radio/shared'
 import { PrismaService } from '../../prisma/prisma.service'
 import { StationGateway } from '../gateway/station.gateway'
-import * as net from 'net'
 
 type PlaybackEventRow = {
   id: string
@@ -13,14 +16,18 @@ type PlaybackEventRow = {
   createdAt: Date
 }
 
-const POLL_INTERVAL_MS = Number.parseInt(process.env.PLAYBACK_OUTBOX_POLL_INTERVAL_MS ?? '400', 10)
+const POLL_INTERVAL_MS = Number.parseInt(process.env.PLAYBACK_OUTBOX_POLL_INTERVAL_MS ?? '100', 10)
 const BATCH_SIZE = Number.parseInt(process.env.PLAYBACK_OUTBOX_BATCH_SIZE ?? '100', 10)
+
+function toClientLoopMode(value: unknown) {
+  if (value === PlaybackLoopMode.TRACK || value === 'TRACK' || value === 'track') return 'track'
+  if (value === PlaybackLoopMode.QUEUE || value === 'QUEUE' || value === 'queue') return 'queue'
+  return 'none'
+}
 
 @Injectable()
 export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PlaybackEventsService.name)
-  private readonly liquidsoapHost = process.env.LIQUIDSOAP_TELNET_HOST ?? 'liquidsoap'
-  private readonly liquidsoapPort = Number.parseInt(process.env.LIQUIDSOAP_TELNET_PORT ?? '1234', 10)
   private interval: NodeJS.Timeout | null = null
   private running = false
   private stopping = false
@@ -38,7 +45,7 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
       void this.flush().catch((error) => {
         this.logger.error(`Playback outbox flush failed: ${this.describeError(error)}`)
       })
-    }, Math.max(100, POLL_INTERVAL_MS))
+    }, Math.max(50, POLL_INTERVAL_MS))
 
     void this.flush().catch((error) => {
       this.logger.error(`Initial playback outbox flush failed: ${this.describeError(error)}`)
@@ -71,13 +78,6 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
       }
 
       for (const event of events) {
-        if (event.type === PrismaPlaybackEventType.TRACK_CHANGED) {
-          const switched = await this.hasLiquidsoapSwitchedToEventTrack(event)
-          if (!switched) {
-            // Keep event pending; it will be retried on next flush tick.
-            continue
-          }
-        }
         const envelope = await this.buildEnvelope(event)
         const wsEvent = this.mapWsEvent(event.type)
 
@@ -131,6 +131,9 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
     if (Array.isArray(payload)) return { payload }
     if (typeof payload === 'object') {
       const normalized = { ...(payload as Record<string, unknown>) }
+      if ('loopMode' in normalized) {
+        normalized.loopMode = toClientLoopMode(normalized.loopMode)
+      }
 
       if (event.type === PrismaPlaybackEventType.TRACK_CHANGED) {
         const trackId = typeof normalized.currentTrackId === 'string'
@@ -148,12 +151,14 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
           normalized.track = track
             ? {
                 id: track.id,
+                filename: track.filename,
                 title: track.title,
                 artist: track.artist,
                 album: track.album,
                 year: track.year,
                 genre: track.genre,
                 duration: track.duration,
+                bitrate: track.bitrate,
                 hasCover: !!track.coverPath,
                 quality: track.quality,
                 uploadedBy: track.uploadedBy,
@@ -170,101 +175,5 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
   private describeError(error: unknown) {
     if (error instanceof Error) return error.message
     return String(error)
-  }
-
-  private async hasLiquidsoapSwitchedToEventTrack(event: PlaybackEventRow) {
-    const payload = event.payload
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return true
-
-    const currentTrackId = (payload as Record<string, unknown>).currentTrackId
-    if (typeof currentTrackId !== 'string' || currentTrackId.length === 0) return true
-
-    try {
-      const liveTrackId = await this.getLiquidsoapCurrentTrackId()
-      return liveTrackId === currentTrackId
-    } catch (error) {
-      this.logger.warn(`Liquidsoap track verification failed: ${this.describeError(error)}`)
-      return false
-    }
-  }
-
-  private async runLiquidsoapCommand(command: string) {
-    return new Promise<string>((resolve, reject) => {
-      let settled = false
-      let response = ''
-      let sawEnd = false
-      let wroteQuit = false
-
-      const finish = (error?: Error | null) => {
-        if (settled) return
-        settled = true
-        if (error) reject(error)
-        else resolve(response)
-      }
-
-      const socket = net.createConnection(
-        { host: this.liquidsoapHost, port: this.liquidsoapPort },
-        () => {
-          socket.write(`${command}\n`, 'utf8', (writeError) => {
-            if (writeError) {
-              finish(writeError instanceof Error ? writeError : new Error(String(writeError)))
-              socket.destroy()
-            }
-          })
-        },
-      )
-
-      socket.setEncoding('utf8')
-      socket.setTimeout(3000)
-      socket.on('data', (chunk: string) => {
-        response += chunk
-        if (!sawEnd && /(^|\n)END(\r?\n|$)/.test(response)) {
-          sawEnd = true
-          if (!wroteQuit) {
-            wroteQuit = true
-            socket.write('quit\n')
-          }
-        }
-      })
-      socket.on('timeout', () => {
-        finish(new Error(`Liquidsoap telnet command timed out: ${command}`))
-        socket.destroy()
-      })
-      socket.on('error', (error) => {
-        finish(error instanceof Error ? error : new Error(String(error)))
-      })
-      socket.on('close', () => {
-        if (/ERROR:/i.test(response)) {
-          finish(new Error(`Liquidsoap telnet command failed: ${command}; response=${response.trim()}`))
-          return
-        }
-        if (!sawEnd && response.trim().length === 0) {
-          finish(new Error(`Liquidsoap telnet command closed without response: ${command}`))
-          return
-        }
-        finish()
-      })
-    })
-  }
-
-  private async getLiquidsoapCurrentTrackId(): Promise<string | null> {
-    const allRaw = await this.runLiquidsoapCommand('request.all')
-    const firstLine = allRaw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => line.length > 0 && line !== 'END' && line !== 'Bye!')
-    if (!firstLine) return null
-
-    const requestIds = firstLine.split(/\s+/).filter((value) => /^\d+$/.test(value))
-    if (requestIds.length === 0) return null
-
-    const metadataRaw = await this.runLiquidsoapCommand(`request.metadata ${requestIds[0]}`)
-    const filenameMatch = metadataRaw.match(/filename="([^"]+)"/)
-    if (!filenameMatch?.[1]) return null
-
-    const trackIdMatch = filenameMatch[1].match(
-      /([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/,
-    )
-    return trackIdMatch?.[1]?.toLowerCase() ?? null
   }
 }

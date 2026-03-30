@@ -15,6 +15,7 @@ interface ListenOnlyPlayerCardProps {
     quality: string
   }
   currentPosition: number
+  displayDuration?: number
   isPaused: boolean
   isPlaying: boolean
   listenerCount: number
@@ -37,6 +38,7 @@ interface ListenOnlyPlayerCardProps {
 export function ListenOnlyPlayerCard({
   track,
   currentPosition,
+  displayDuration,
   isPaused,
   isPlaying,
   listenerCount,
@@ -59,8 +61,8 @@ export function ListenOnlyPlayerCard({
       >
         <TrackInfo
           track={track}
-          currentQueueType={null}
           currentPosition={currentPosition}
+          displayDuration={displayDuration}
           isPaused={isPaused}
           isPlaying={isPlaying}
           listenerCount={listenerCount}

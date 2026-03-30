@@ -16,6 +16,7 @@ import {
   TrackStatus,
   TrackQuality,
   SUPPORTED_AUDIO_FORMATS,
+  SUPPORTED_EXTENSIONS,
   USER_STORAGE_LIMIT_BYTES,
 } from '@web-radio/shared'
 
@@ -34,7 +35,7 @@ export class TracksService {
     userId: string,
     file: Express.Multer.File,
   ) {
-    if (!SUPPORTED_AUDIO_FORMATS.includes(file.mimetype)) {
+    if (!this.isSupportedAudioUpload(file)) {
       this.safeDeleteTempFile(file.path)
       throw new BadRequestException('Unsupported audio format')
     }
@@ -75,14 +76,19 @@ export class TracksService {
       const common = metadata?.common ?? {}
       const format = metadata?.format ?? {}
       const duration = format.duration ?? 0
-      const bitrate = format.bitrate ? Math.round(format.bitrate / 1000) : null
+      const bitrate = this.computeBitrateKbps({
+        reportedBitrateBps: typeof format.bitrate === 'number' ? format.bitrate : null,
+        durationSeconds: duration,
+        fileSizeBytes: file.size,
+      })
 
       let quality = TrackQuality.MEDIUM
-      if (bitrate) {
+      if (this.isFlacUpload(file) || format.lossless === true) {
+        quality = TrackQuality.LOSSLESS
+      } else if (bitrate) {
         if (bitrate >= 300) quality = TrackQuality.HIGH
         else if (bitrate <= 80) quality = TrackQuality.LOW
       }
-      if (file.mimetype === 'audio/flac') quality = TrackQuality.LOSSLESS
 
       const track = await this.prisma.track.create({
         data: {
@@ -285,6 +291,70 @@ export class TracksService {
     return this.formatTrack(updated)
   }
 
+  async streamTrack(trackId: string, res: any, rangeHeader: string | undefined, userId?: string) {
+    const track = await this.prisma.track.findUnique({
+      where: { id: trackId },
+      include: {
+        assets: {
+          where: { kind: TrackAssetKind.ORIGINAL },
+          take: 1,
+        },
+      },
+    })
+    if (!track) throw new NotFoundException('Track not found')
+    await this.assertStationReadable(track.stationId, userId)
+
+    const objectKey = track.originalPath
+    if (!objectKey) throw new NotFoundException('Track file not found')
+
+    const mimeType = track.assets[0]?.mimeType ?? 'audio/mpeg'
+    const stat = await this.storageService.getObjectStat('tracks', objectKey).catch(() => null)
+    const totalSize = stat?.size ?? track.fileSize ?? 0
+
+    if (rangeHeader && totalSize > 0) {
+      const match = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
+      if (match) {
+        const start = match[1] ? parseInt(match[1], 10) : 0
+        const end = match[2] ? parseInt(match[2], 10) : totalSize - 1
+        const chunkSize = end - start + 1
+
+        res.set({
+          'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': mimeType,
+          'Cache-Control': 'no-store',
+        })
+        res.status(206)
+
+        try {
+          const stream = await this.storageService.getPartialObjectStream('tracks', objectKey, start, chunkSize)
+          stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end() })
+          stream.pipe(res)
+        } catch {
+          throw new NotFoundException('Track file not found')
+        }
+        return
+      }
+    }
+
+    res.set({
+      'Content-Type': mimeType,
+      'Accept-Ranges': 'bytes',
+      ...(totalSize > 0 ? { 'Content-Length': totalSize } : {}),
+      'Cache-Control': 'no-store',
+    })
+    res.status(200)
+
+    try {
+      const stream = await this.storageService.getObjectStream('tracks', objectKey)
+      stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end() })
+      stream.pipe(res)
+    } catch {
+      throw new NotFoundException('Track file not found')
+    }
+  }
+
   async getWaveform(trackId: string, userId?: string) {
     const track = await this.prisma.track.findUnique({ where: { id: trackId } })
     if (!track) throw new NotFoundException('Track not found')
@@ -423,6 +493,59 @@ export class TracksService {
       default:
         return null
     }
+  }
+
+  private normalizeMimeType(value?: string | null) {
+    return String(value ?? '').trim().toLowerCase()
+  }
+
+  private isFallbackBinaryMime(value?: string | null) {
+    const mime = this.normalizeMimeType(value)
+    return mime.length === 0 || mime === 'application/octet-stream' || mime === 'binary/octet-stream'
+  }
+
+  private isSupportedAudioUpload(file: Express.Multer.File) {
+    const mime = this.normalizeMimeType(file.mimetype)
+    const ext = path.extname(file.originalname || '').toLowerCase()
+    const isExtAllowed = SUPPORTED_EXTENSIONS.includes(ext)
+    const isMimeAllowed = SUPPORTED_AUDIO_FORMATS.includes(mime)
+    return isExtAllowed && (isMimeAllowed || mime.startsWith('audio/') || this.isFallbackBinaryMime(mime))
+  }
+
+  private isFlacUpload(file: Express.Multer.File) {
+    const mime = this.normalizeMimeType(file.mimetype)
+    const ext = path.extname(file.originalname || '').toLowerCase()
+    return mime === 'audio/flac' || mime === 'audio/x-flac' || ext === '.flac'
+  }
+
+  private computeBitrateKbps(args: {
+    reportedBitrateBps?: number | null
+    durationSeconds?: number | null
+    fileSizeBytes?: number | null
+  }) {
+    const reportedKbps =
+      typeof args.reportedBitrateBps === 'number' && Number.isFinite(args.reportedBitrateBps) && args.reportedBitrateBps > 0
+        ? Math.round(args.reportedBitrateBps / 1000)
+        : null
+
+    const estimatedKbps =
+      typeof args.durationSeconds === 'number' &&
+      Number.isFinite(args.durationSeconds) &&
+      args.durationSeconds > 0 &&
+      typeof args.fileSizeBytes === 'number' &&
+      Number.isFinite(args.fileSizeBytes) &&
+      args.fileSizeBytes > 0
+        ? Math.round((args.fileSizeBytes * 8) / (args.durationSeconds * 1000))
+        : null
+
+    if (reportedKbps && estimatedKbps) {
+      const ratio = reportedKbps / Math.max(estimatedKbps, 1)
+      if (ratio < 0.65 || ratio > 1.55) {
+        return estimatedKbps
+      }
+    }
+
+    return reportedKbps ?? estimatedKbps ?? null
   }
 
   private safeDeleteTempFile(filePath?: string) {

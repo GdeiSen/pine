@@ -11,11 +11,22 @@ interface LeftPanelProps {
   stationCode?: string
   stationName?: string
   stationDescription?: string | null
+  stationPlaybackSeconds?: number | null
   messages: ChatMessage[]
   onSendMessage: (content: string) => void
   currentUserId?: string
   showMessages?: boolean
   showInput?: boolean
+}
+
+function formatPlaybackTime(secondsValue: number | null | undefined) {
+  const safeSeconds = Number.isFinite(secondsValue) ? Math.max(0, Math.floor(secondsValue ?? 0)) : 0
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const seconds = safeSeconds % 60
+  return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds
+    .toString()
+    .padStart(2, '0')}`
 }
 
 export function LeftPanel({
@@ -24,6 +35,7 @@ export function LeftPanel({
   stationCode = '000000',
   stationName,
   stationDescription,
+  stationPlaybackSeconds = 0,
   messages,
   onSendMessage,
   currentUserId,
@@ -51,6 +63,20 @@ export function LeftPanel({
       .slice(-4)
   }, [messages, now])
 
+  const currentTimeLabel = useMemo(
+    () =>
+      new Date(now).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }),
+    [now],
+  )
+  const playbackTimeLabel = useMemo(
+    () => formatPlaybackTime(stationPlaybackSeconds),
+    [stationPlaybackSeconds],
+  )
+
   const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const value = input.trim()
@@ -65,11 +91,11 @@ export function LeftPanel({
       style={{ background: 'var(--bg-panel)' }}
     >
       {/* Numbers — flush to top */}
-      <div className="flex flex-col pt-10 px-8">
-        {/* Top row with red dot */}
-        <div className="flex items-start">
+      <div className="flex flex-col pt-10 w-full px-4">
+        {/* Top row */}
+        <div className="w-full flex justify-center">
           <motion.p
-            className="font-black tabular-nums leading-none"
+            className="font-black tabular-nums leading-none text-center w-full"
             style={{
               fontSize: 'clamp(80px, 15vw, 116px)',
               letterSpacing: '0.04em',
@@ -80,15 +106,9 @@ export function LeftPanel({
           >
             {top}
           </motion.p>
-          <motion.div
-            className="rounded-full flex-shrink-0 mt-3 ml-1"
-            style={{ width: 10, height: 10, background: '#E8440F' }}
-            animate={{ opacity: isActive ? 1 : 0.5 }}
-            transition={{ duration: 0.8 }}
-          />
         </div>
         <motion.p
-          className="font-black tabular-nums leading-none"
+          className="font-black tabular-nums leading-none text-center w-full"
           style={{
             fontSize: 'clamp(80px, 15vw, 116px)',
             letterSpacing: '0.04em',
@@ -118,6 +138,12 @@ export function LeftPanel({
               {stationDescription}
             </p>
           )}
+          <p
+            className="text-[11px] tracking-[0.08em] uppercase whitespace-nowrap overflow-hidden text-ellipsis"
+            style={{ color: 'rgba(255,255,255,0.36)' }}
+          >
+            {currentTimeLabel} • {playbackTimeLabel}
+          </p>
         </div>
       )}
 
@@ -177,8 +203,11 @@ export function LeftPanel({
       </div>
 
       {showInput && (
-        <form onSubmit={handleSubmit} className="px-6 pb-6 pt-4 border-t border-white/10 bg-black/20">
-          <div className="flex items-center gap-2">
+        <form
+          onSubmit={handleSubmit}
+          className="h-16 px-4 border-t border-white/10 bg-black/20 flex items-center"
+        >
+          <div className="flex items-center gap-2 w-full">
             <input
               data-no-focus-ring="true"
               value={input}
