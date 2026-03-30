@@ -42,10 +42,11 @@ Thumbs.db
 # =========================
 # Runtime data / local storage
 # =========================
-storage/
-uploads/
-tmp/
-temp/
+/storage/
+/uploads/
+/tmp/
+/temp/
+apps/server/storage/
 
 # =========================
 # Databases
