@@ -53,7 +53,7 @@ export function ListenOnlyPlayerCard({
   return (
     <div className="mt-2 w-full">
       <div
-        className="min-h-[320px]"
+        className="h-[320px] lg:h-[425px]"
         style={{
           borderRadius: 16,
           overflow: 'hidden',

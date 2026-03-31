@@ -610,7 +610,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     return (
       <div className="mt-2 w-full">
         <div
-          className="min-h-[320px] flex items-center justify-center px-6"
+          className="h-[320px] lg:h-[425px] flex items-center justify-center px-6"
           style={{
             borderRadius: 16,
             overflow: 'hidden',

@@ -220,7 +220,7 @@ export function useDirectPlaybackEngine({
   }, [fadeVolumeTo])
 
   const getTargetPosition = useCallback((): number => {
-    if (typeof currentPosition === 'number' && Number.isFinite(currentPosition) && (isPaused || !trackStartedAt)) {
+    if (typeof currentPosition === 'number' && Number.isFinite(currentPosition)) {
       if (trackDuration > 0) return Math.min(Math.max(0, currentPosition), trackDuration)
       return Math.max(0, currentPosition)
     }
@@ -229,7 +229,7 @@ export function useDirectPlaybackEngine({
     const pos = (Date.now() - trackStartedAt) / 1000
     if (trackDuration > 0) return Math.min(Math.max(0, pos), trackDuration)
     return Math.max(0, pos)
-  }, [currentPosition, isPaused, trackDuration, trackStartedAt])
+  }, [currentPosition, trackDuration, trackStartedAt])
 
   const getExpectedPosition = useCallback((): number => {
     return getTargetPosition()
