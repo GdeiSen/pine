@@ -18,6 +18,7 @@ const TIME_SYNC_EMA_ALPHA = 0.2
 const DIRECT_FORWARD_SYNC_CORRECTION_THRESHOLD_S = 1.1
 const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
+const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
 
 function normalizeLoopMode(value: unknown): 'none' | 'track' | 'queue' {
   if (value === 'track' || value === 'TRACK') return 'track'
@@ -209,6 +210,12 @@ export function useStation(code: string, joinPassword?: string | null) {
     void refreshStreamInfo()
     socket.connect()
 
+    const initialSyncTimeout = window.setTimeout(() => {
+      if (cancelled) return
+      setConnecting(false)
+      void refreshStationSnapshot()
+    }, INITIAL_STATION_SYNC_TIMEOUT_MS)
+
     socket.emit(WS_EVENTS_V2.STATION_JOIN, {
       code,
       ...(joinPassword ? { password: joinPassword } : {}),
@@ -223,6 +230,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     }
 
     const handleStationState = (state: any) => {
+      window.clearTimeout(initialSyncTimeout)
       const startedAt = normalizeTrackStartedAt(state.trackStartedAt)
       const nextTrackId = state.currentTrack?.id ?? null
       const nextPosition = getEstimatedServerPosition({
@@ -632,6 +640,7 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     return () => {
       cancelled = true
+      window.clearTimeout(initialSyncTimeout)
       socket.emit(WS_EVENTS_V2.STATION_LEAVE)
       socket.off(WS_EVENTS_V2.STATION_STATE, handleStationState)
       socket.off(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)
