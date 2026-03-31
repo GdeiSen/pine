@@ -126,10 +126,20 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
   const beginDirectCommandWait = (commandType: PlaybackCommandType, trackIdBefore?: string | null) => {
     if (!isDirectModeRef.current) return
+    const resolvedTrackIdBefore = trackIdBefore ?? stateRef.current.currentTrackId ?? null
+    const existingPending = pendingDirectCommandRef.current
+    if (
+      existingPending &&
+      Date.now() <= existingPending.expiresAt &&
+      existingPending.type === commandType &&
+      existingPending.trackIdBefore === resolvedTrackIdBefore
+    ) {
+      return
+    }
 
     pendingDirectCommandRef.current = {
       type: commandType,
-      trackIdBefore: trackIdBefore ?? stateRef.current.currentTrackId ?? null,
+      trackIdBefore: resolvedTrackIdBefore,
       expiresAt: Date.now() + DIRECT_COMMAND_WAIT_TIMEOUT_MS,
     }
 

@@ -118,10 +118,21 @@ export function useStation(code: string, joinPassword?: string | null) {
     (commandType: PlaybackCommandType, trackIdBefore?: string | null) => {
       const state = useStationStore.getState()
       if (state.station?.playbackMode !== 'DIRECT') return
+      const resolvedTrackIdBefore = trackIdBefore ?? state.playback.currentTrack?.id ?? null
+      const existingPending = pendingDirectCommandRef.current
+      if (
+        existingPending &&
+        Date.now() <= existingPending.expiresAt &&
+        existingPending.type === commandType &&
+        existingPending.trackIdBefore === resolvedTrackIdBefore
+      ) {
+        localTickAnchorRef.current = Date.now()
+        return
+      }
 
       pendingDirectCommandRef.current = {
         type: commandType,
-        trackIdBefore: trackIdBefore ?? state.playback.currentTrack?.id ?? null,
+        trackIdBefore: resolvedTrackIdBefore,
         expiresAt: Date.now() + DIRECT_COMMAND_WAIT_TIMEOUT_MS,
       }
 

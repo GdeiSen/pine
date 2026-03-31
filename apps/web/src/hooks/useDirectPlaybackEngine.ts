@@ -15,10 +15,11 @@ const RESUME_SYNC_SOFT_FORWARD_LIMIT_S = 1.15
 const TRACK_START_STABILIZE_MS = 3_200
 const TRACK_OPENING_GRACE_S = 3
 const TRACK_END_SEEK_GUARD_S = 0.4
-const STALL_RECOVERY_DELAY_MS = 2_000
+const STALL_RECOVERY_DELAY_MS = 3_500
+const TRACK_OPEN_RECOVERY_GRACE_MS = 8_000
 const STALL_RECOVERY_MAX_RETRIES = 3
 const VOLUME_FADE_IN_MS = 1200
-const VOLUME_FADE_OUT_MS = 1200
+const VOLUME_FADE_OUT_MS = 380
 
 type UseDirectPlaybackEngineArgs = {
   trackId: string | null
@@ -55,7 +56,13 @@ function normalizeMediaUrl(url: string): string {
 function isAutoplayBlock(error: unknown) {
   if (!error || typeof error !== 'object') return false
   const name = 'name' in error ? String((error as { name?: unknown }).name ?? '') : ''
-  return name === 'NotAllowedError' || name === 'AbortError'
+  return name === 'NotAllowedError'
+}
+
+function isPlaybackAbort(error: unknown) {
+  if (!error || typeof error !== 'object') return false
+  const name = 'name' in error ? String((error as { name?: unknown }).name ?? '') : ''
+  return name === 'AbortError'
 }
 
 function clampVolume(value: number) {
@@ -95,6 +102,7 @@ export function useDirectPlaybackEngine({
   const trackDurationRef = useRef(trackDuration)
   const stallRecoveryTimerRef = useRef<number | null>(null)
   const stallRecoveryAttemptsRef = useRef(0)
+  const sourcePlaybackStartedRef = useRef(false)
 
   const [audioConnectionState, setAudioConnectionState] = useState<AudioConnectionState>('idle')
   const [audioConnectionMessage, setAudioConnectionMessage] = useState<string | null>(null)
@@ -349,6 +357,10 @@ export function useDirectPlaybackEngine({
           setConnectionStatus('blocked', 'Browser blocked audio playback. Tap restart.')
           return
         }
+        if (isPlaybackAbort(error)) {
+          setConnectionStatus('connecting', message)
+          return
+        }
         setConnectionStatus('reconnecting', 'Failed to start track')
       }
     },
@@ -411,6 +423,7 @@ export function useDirectPlaybackEngine({
 
       pendingTargetPositionRef.current = safeTarget
       lastTrackLoadAtRef.current = Date.now()
+      sourcePlaybackStartedRef.current = false
       playTokenRef.current += 1
       clearTransitionState()
       clearResumeSyncGrace()
@@ -462,6 +475,12 @@ export function useDirectPlaybackEngine({
       if (!audio || !desired.trackId || desired.isPaused) return
       if (stallRecoveryTimerRef.current !== null) return
 
+      const openingTrack = !sourcePlaybackStartedRef.current
+      const sinceTrackLoadMs = Date.now() - lastTrackLoadAtRef.current
+      const recoveryDelayMs = openingTrack
+        ? Math.max(TRACK_OPEN_RECOVERY_GRACE_MS - sinceTrackLoadMs, 250)
+        : STALL_RECOVERY_DELAY_MS
+
       stallRecoveryTimerRef.current = window.setTimeout(() => {
         stallRecoveryTimerRef.current = null
         if (!mountedRef.current) return
@@ -478,6 +497,14 @@ export function useDirectPlaybackEngine({
           return
         }
 
+        if (openingTrack && currentAudio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+          void startPlayback('Loading track...', {
+            withResumeGrace: true,
+            suppressConnectingPulse: true,
+          })
+          return
+        }
+
         const expectedPosition = getExpectedPosition()
         const targetPosition = expectedPosition >= 0 ? expectedPosition : 0
 
@@ -489,6 +516,8 @@ export function useDirectPlaybackEngine({
         }
 
         stallRecoveryAttemptsRef.current += 1
+        lastTrackLoadAtRef.current = Date.now()
+        sourcePlaybackStartedRef.current = false
         pendingTargetPositionRef.current = targetPosition
         setConnectionStatus('reconnecting', 'Recovering playback...')
         currentAudio.load()
@@ -496,12 +525,15 @@ export function useDirectPlaybackEngine({
           withResumeGrace: true,
           suppressConnectingPulse: true,
         })
-      }, STALL_RECOVERY_DELAY_MS)
+      }, recoveryDelayMs)
 
       if (reason === 'error') {
         setConnectionStatus('reconnecting', 'Failed to load track')
       } else {
-        setConnectionStatus('buffering', 'Buffering track...')
+        setConnectionStatus(
+          openingTrack ? 'connecting' : 'buffering',
+          openingTrack ? 'Loading track...' : 'Buffering track...',
+        )
       }
     },
     [clearStallRecovery, getExpectedPosition, loadTrack, setConnectionStatus, startPlayback],
@@ -599,6 +631,7 @@ export function useDirectPlaybackEngine({
     const onPlaying = () => {
       const desired = desiredStateRef.current
       if (!hasExpectedSource()) return
+      sourcePlaybackStartedRef.current = true
       engineCallbacksRef.current.clearStallRecovery(true)
       if (engineCallbacksRef.current.isTransitionGuardActiveForTrack(desired.trackId)) {
         audio.pause()
@@ -716,6 +749,7 @@ export function useDirectPlaybackEngine({
         sourceUrlRef.current = null
         pendingTargetPositionRef.current = null
         playTokenRef.current += 1
+        sourcePlaybackStartedRef.current = false
         clearTransitionState()
         clearResumeSyncGrace()
         clearStallRecovery(true)
