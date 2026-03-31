@@ -192,7 +192,9 @@ export function useDirectPlaybackEngine({
   }, [fadeVolumeTo])
 
   const getTargetPosition = useCallback((): number => {
-    if (typeof currentPosition === 'number' && Number.isFinite(currentPosition) && (isPaused || !trackStartedAt)) {
+    if (typeof currentPosition === 'number' && Number.isFinite(currentPosition)) {
+      // Rely on state position instead of local wall-clock interpolation.
+      // This avoids repeated micro-seeks on devices whose clock drifts from server time (notably iOS).
       if (trackDuration > 0) return Math.min(Math.max(0, currentPosition), trackDuration)
       return Math.max(0, currentPosition)
     }
