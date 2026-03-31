@@ -35,6 +35,14 @@ const RECONCILE_INTERVAL_MS = Number.parseInt(
   process.env.PLAYBACK_RECONCILE_INTERVAL_MS ?? process.env.PLAYOUT_RECONCILE_INTERVAL_MS ?? '5000',
   10,
 )
+const STUCK_COMMAND_TTL_MS = Math.max(
+  10_000,
+  Number.parseInt(process.env.PLAYBACK_STUCK_COMMAND_TTL_MS ?? '60000', 10),
+)
+const STUCK_COMMAND_RECOVERY_INTERVAL_MS = Math.max(
+  10_000,
+  Number.parseInt(process.env.PLAYBACK_STUCK_COMMAND_RECOVERY_INTERVAL_MS ?? '30000', 10),
+)
 const LIQUIDSOAP_CONTROL_DIR = process.env.LIQUIDSOAP_CONTROL_DIR ?? '/var/lib/liquidsoap/control'
 const LIQUIDSOAP_CACHE_DIR = process.env.LIQUIDSOAP_CACHE_DIR ?? '/var/lib/liquidsoap/cache'
 const LIQUIDSOAP_TELNET_HOST = process.env.LIQUIDSOAP_TELNET_HOST ?? 'liquidsoap'
@@ -172,7 +180,7 @@ async function writeAtomic(filePath: string, content: string) {
 }
 
 async function recoverStuckCommands() {
-  const staleBefore = new Date(Date.now() - 5 * 60_000)
+  const staleBefore = new Date(Date.now() - STUCK_COMMAND_TTL_MS)
   const recovered = await prisma.playbackCommand.updateMany({
     where: {
       status: PlaybackCommandStatus.PROCESSING,
@@ -1680,6 +1688,12 @@ async function bootstrap() {
   setInterval(() => {
     console.log(`[${nowIso()}] playback-worker heartbeat`)
   }, Math.max(HEARTBEAT_INTERVAL_MS, 5_000))
+
+  setInterval(() => {
+    void recoverStuckCommands().catch((error) => {
+      console.error(`[${nowIso()}] stuck command recovery error: ${safeMessage(error)}`)
+    })
+  }, STUCK_COMMAND_RECOVERY_INTERVAL_MS)
 
   await runCommandLoop()
   await runReconcileLoop()

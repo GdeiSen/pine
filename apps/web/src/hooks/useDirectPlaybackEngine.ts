@@ -16,6 +16,8 @@ const RESUME_SYNC_GRACE_MS = 1_100
 const RESUME_SYNC_SOFT_FORWARD_LIMIT_S = 1.15
 const TRACK_START_STABILIZE_MS = 1_400
 const TRACK_END_SEEK_GUARD_S = 0.4
+const STALL_RECOVERY_DELAY_MS = 2_000
+const STALL_RECOVERY_MAX_RETRIES = 3
 const VOLUME_FADE_IN_MS = 1200
 const VOLUME_FADE_OUT_MS = 1200
 
@@ -90,6 +92,10 @@ export function useDirectPlaybackEngine({
   const volumeFadeRafRef = useRef<number | null>(null)
   const volumeFadeTokenRef = useRef(0)
   const targetVolumeRef = useRef(clampVolume(volume))
+  const isPausedRef = useRef(isPaused)
+  const trackDurationRef = useRef(trackDuration)
+  const stallRecoveryTimerRef = useRef<number | null>(null)
+  const stallRecoveryAttemptsRef = useRef(0)
 
   const [audioConnectionState, setAudioConnectionState] = useState<AudioConnectionState>('idle')
   const [audioConnectionMessage, setAudioConnectionMessage] = useState<string | null>(null)
@@ -214,6 +220,21 @@ export function useDirectPlaybackEngine({
     desiredStateRef.current = { trackId, isPaused }
   }, [isPaused, trackId])
 
+  useEffect(() => {
+    isPausedRef.current = isPaused
+    trackDurationRef.current = trackDuration
+  }, [isPaused, trackDuration])
+
+  const clearStallRecovery = useCallback((resetAttempts = false) => {
+    if (stallRecoveryTimerRef.current !== null) {
+      window.clearTimeout(stallRecoveryTimerRef.current)
+      stallRecoveryTimerRef.current = null
+    }
+    if (resetAttempts) {
+      stallRecoveryAttemptsRef.current = 0
+    }
+  }, [])
+
   const clearTransitionState = useCallback(() => {
     transitionGuardRef.current = null
     if (transitionTimerRef.current !== null) {
@@ -251,15 +272,21 @@ export function useDirectPlaybackEngine({
     const audio = audioRef.current
     if (!audio || audio.readyState < 1) return
     if (!Number.isFinite(targetPosition)) return
+
+    const isPlaybackPaused = isPausedRef.current
+    const currentTrackDuration = trackDurationRef.current
     if (
       mode === 'soft' &&
-      !isPaused &&
+      !isPlaybackPaused &&
       Date.now() - lastTrackLoadAtRef.current < TRACK_START_STABILIZE_MS
     ) {
       return
     }
+
     const expected =
-      trackDuration > 0 ? Math.min(Math.max(0, targetPosition), trackDuration) : Math.max(0, targetPosition)
+      currentTrackDuration > 0
+        ? Math.min(Math.max(0, targetPosition), currentTrackDuration)
+        : Math.max(0, targetPosition)
     const actual = audio.currentTime
 
     if (mode === 'strict') {
@@ -280,7 +307,7 @@ export function useDirectPlaybackEngine({
     if (expected - actual > SOFT_ALIGN_THRESHOLD_S || actual - expected > DRIFT_THRESHOLD_S) {
       audio.currentTime = expected
     }
-  }, [isPaused, isResumeSyncGraceActive, trackDuration])
+  }, [isResumeSyncGraceActive])
 
   const seekToExpectedPosition = useCallback(() => {
     const expected = getExpectedPosition()
@@ -340,10 +367,11 @@ export function useDirectPlaybackEngine({
       const desired = desiredStateRef.current
       const normalizedTarget = Number.isFinite(targetPosition) ? Math.max(0, targetPosition) : 0
       let safeTarget = normalizedTarget
-      if (!desired.isPaused && trackDuration > 0) {
-        const bounded = Math.min(normalizedTarget, trackDuration)
+      const currentTrackDuration = trackDurationRef.current
+      if (!desired.isPaused && currentTrackDuration > 0) {
+        const bounded = Math.min(normalizedTarget, currentTrackDuration)
         safeTarget =
-          bounded >= Math.max(trackDuration - TRACK_END_SEEK_GUARD_S, 0)
+          bounded >= Math.max(currentTrackDuration - TRACK_END_SEEK_GUARD_S, 0)
             ? 0
             : bounded
       }
@@ -353,6 +381,7 @@ export function useDirectPlaybackEngine({
       playTokenRef.current += 1
       clearTransitionState()
       clearResumeSyncGrace()
+      clearStallRecovery(true)
 
       stopVolumeFade()
       audio.pause()
@@ -383,7 +412,66 @@ export function useDirectPlaybackEngine({
 
       void startPlayback('Resuming track...')
     },
-    [clearResumeSyncGrace, clearTransitionState, setConnectionStatus, startPlayback, stopVolumeFade, trackDuration],
+    [
+      clearResumeSyncGrace,
+      clearStallRecovery,
+      clearTransitionState,
+      setConnectionStatus,
+      startPlayback,
+      stopVolumeFade,
+    ],
+  )
+
+  const scheduleStallRecovery = useCallback(
+    (reason: 'waiting' | 'stalled' | 'error') => {
+      const audio = audioRef.current
+      const desired = desiredStateRef.current
+      if (!audio || !desired.trackId || desired.isPaused) return
+      if (stallRecoveryTimerRef.current !== null) return
+
+      stallRecoveryTimerRef.current = window.setTimeout(() => {
+        stallRecoveryTimerRef.current = null
+        if (!mountedRef.current) return
+
+        const currentAudio = audioRef.current
+        const currentDesired = desiredStateRef.current
+        if (!currentAudio || !currentDesired.trackId || currentDesired.isPaused) {
+          clearStallRecovery(true)
+          return
+        }
+
+        if (!currentAudio.paused && currentAudio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+          clearStallRecovery(true)
+          return
+        }
+
+        const expectedPosition = getExpectedPosition()
+        const targetPosition = expectedPosition >= 0 ? expectedPosition : 0
+
+        if (stallRecoveryAttemptsRef.current >= STALL_RECOVERY_MAX_RETRIES - 1) {
+          clearStallRecovery(true)
+          setConnectionStatus('reconnecting', 'Reloading track...')
+          void loadTrack(currentDesired.trackId, targetPosition)
+          return
+        }
+
+        stallRecoveryAttemptsRef.current += 1
+        pendingTargetPositionRef.current = targetPosition
+        setConnectionStatus('reconnecting', 'Recovering playback...')
+        currentAudio.load()
+        void startPlayback('Recovering playback...', {
+          withResumeGrace: true,
+          suppressConnectingPulse: true,
+        })
+      }, STALL_RECOVERY_DELAY_MS)
+
+      if (reason === 'error') {
+        setConnectionStatus('reconnecting', 'Failed to load track')
+      } else {
+        setConnectionStatus('buffering', 'Buffering track...')
+      }
+    },
+    [clearStallRecovery, getExpectedPosition, loadTrack, setConnectionStatus, startPlayback],
   )
 
   // Mount / unmount
@@ -424,6 +512,7 @@ export function useDirectPlaybackEngine({
 
     const onCanPlay = () => {
       if (!hasExpectedSource()) return
+      clearStallRecovery(true)
       alignPendingTarget('strict')
       const desired = desiredStateRef.current
       if (!desired.trackId) return
@@ -441,6 +530,7 @@ export function useDirectPlaybackEngine({
     const onPlaying = () => {
       const desired = desiredStateRef.current
       if (!hasExpectedSource()) return
+      clearStallRecovery(true)
       if (isTransitionGuardActiveForTrack(desired.trackId)) {
         audio.pause()
         setConnectionStatus('connecting', 'Switching track...')
@@ -453,18 +543,19 @@ export function useDirectPlaybackEngine({
     const onWaiting = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId || desired.isPaused) return
-      setConnectionStatus('buffering', 'Buffering track...')
+      scheduleStallRecovery('waiting')
     }
 
     const onStalled = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId || desired.isPaused) return
-      setConnectionStatus('buffering', 'Buffering track...')
+      scheduleStallRecovery('stalled')
     }
 
     const onPause = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId || !desired.isPaused) return
+      clearStallRecovery(true)
       setConnectionStatus('paused', null)
     }
 
@@ -486,7 +577,7 @@ export function useDirectPlaybackEngine({
         return
       }
 
-      setConnectionStatus('reconnecting', 'Failed to load track')
+      scheduleStallRecovery('error')
     }
 
     audio.addEventListener('loadedmetadata', onLoadedMetadata)
@@ -518,12 +609,23 @@ export function useDirectPlaybackEngine({
       pendingTargetPositionRef.current = null
       clearTransitionState()
       clearResumeSyncGrace()
+      clearStallRecovery(true)
       if (driftTimerRef.current !== null) {
         window.clearInterval(driftTimerRef.current)
         driftTimerRef.current = null
       }
     }
-  }, [applyTargetPosition, clearResumeSyncGrace, clearTransitionState, isTransitionGuardActiveForTrack, setConnectionStatus, startPlayback, stopVolumeFade])
+  }, [
+    applyTargetPosition,
+    clearResumeSyncGrace,
+    clearStallRecovery,
+    clearTransitionState,
+    isTransitionGuardActiveForTrack,
+    scheduleStallRecovery,
+    setConnectionStatus,
+    startPlayback,
+    stopVolumeFade,
+  ])
 
   // Volume
   useEffect(() => {
@@ -557,6 +659,7 @@ export function useDirectPlaybackEngine({
         playTokenRef.current += 1
         clearTransitionState()
         clearResumeSyncGrace()
+        clearStallRecovery(true)
         setConnectionStatus('idle', null)
       }
       return
@@ -568,7 +671,7 @@ export function useDirectPlaybackEngine({
       void loadTrack(trackId, nextTargetPosition >= 0 ? nextTargetPosition : 0)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackId])
+  }, [clearResumeSyncGrace, clearStallRecovery, clearTransitionState, setConnectionStatus, stopVolumeFade, trackId])
 
   // Play/pause toggle (when track hasn't changed)
   useEffect(() => {
@@ -680,6 +783,7 @@ export function useDirectPlaybackEngine({
       }, TRANSITION_GUARD_MS)
       playTokenRef.current += 1
       clearResumeSyncGrace()
+      clearStallRecovery(true)
       const audio = audioRef.current
       if (audio) {
         stopVolumeFade()
@@ -687,7 +791,14 @@ export function useDirectPlaybackEngine({
       }
       setConnectionStatus('connecting', message)
     },
-    [clearResumeSyncGrace, clearTransitionState, setConnectionStatus, startPlayback, stopVolumeFade],
+    [
+      clearResumeSyncGrace,
+      clearStallRecovery,
+      clearTransitionState,
+      setConnectionStatus,
+      startPlayback,
+      stopVolumeFade,
+    ],
   )
 
   const reportDrift = useCallback(

@@ -12,6 +12,7 @@ import { v4 as uuid } from 'uuid'
 import { PrismaService } from '../../prisma/prisma.service'
 import { StorageService } from '../storage/storage.service'
 import { StorageScope } from '../storage/storage.config'
+import { parseSingleByteRange } from '../../common/http-range'
 import {
   TrackStatus,
   TrackQuality,
@@ -311,31 +312,40 @@ export class TracksService {
     const stat = await this.storageService.getObjectStat('tracks', objectKey).catch(() => null)
     const totalSize = stat?.size ?? track.fileSize ?? 0
 
-    if (rangeHeader && totalSize > 0) {
-      const match = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
-      if (match) {
-        const start = match[1] ? parseInt(match[1], 10) : 0
-        const end = match[2] ? parseInt(match[2], 10) : totalSize - 1
-        const chunkSize = end - start + 1
+    const byteRange = parseSingleByteRange(rangeHeader, totalSize)
+    if (byteRange.kind === 'unsatisfiable') {
+      res.set({
+        'Content-Range': `bytes */${totalSize}`,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'no-store',
+      })
+      res.status(416).end()
+      return
+    }
 
-        res.set({
-          'Content-Range': `bytes ${start}-${end}/${totalSize}`,
-          'Accept-Ranges': 'bytes',
-          'Content-Length': chunkSize,
-          'Content-Type': mimeType,
-          'Cache-Control': 'no-store',
-        })
-        res.status(206)
+    if (byteRange.kind === 'partial') {
+      res.set({
+        'Content-Range': `bytes ${byteRange.start}-${byteRange.end}/${totalSize}`,
+        'Accept-Ranges': 'bytes',
+        'Content-Length': byteRange.length,
+        'Content-Type': mimeType,
+        'Cache-Control': 'no-store',
+      })
+      res.status(206)
 
-        try {
-          const stream = await this.storageService.getPartialObjectStream('tracks', objectKey, start, chunkSize)
-          stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end() })
-          stream.pipe(res)
-        } catch {
-          throw new NotFoundException('Track file not found')
-        }
-        return
+      try {
+        const stream = await this.storageService.getPartialObjectStream(
+          'tracks',
+          objectKey,
+          byteRange.start,
+          byteRange.length,
+        )
+        stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end() })
+        stream.pipe(res)
+      } catch {
+        throw new NotFoundException('Track file not found')
       }
+      return
     }
 
     res.set({
