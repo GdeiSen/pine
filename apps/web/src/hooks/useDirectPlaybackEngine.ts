@@ -6,7 +6,6 @@ import { resolveConfiguredOrigin } from '@/lib/origin'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 const MEDIA_BASE_URL = process.env.NEXT_PUBLIC_MEDIA_BASE_URL ?? ''
-const SOCKET_URL = process.env.NEXT_PUBLIC_SOCKET_URL ?? ''
 const DRIFT_THRESHOLD_S = 2.5
 const DRIFT_CORRECTION_INTERVAL_MS = 5_000
 const STRICT_ALIGN_THRESHOLD_S = 0.05
@@ -37,7 +36,7 @@ function getAccessToken(): string | null {
 
 function buildStreamUrl(trackId: string): string {
   const token = getAccessToken()
-  const backendOrigin = resolveConfiguredOrigin(MEDIA_BASE_URL || SOCKET_URL)
+  const backendOrigin = resolveConfiguredOrigin(MEDIA_BASE_URL)
   const base = backendOrigin
     ? `${backendOrigin}/api/tracks/${trackId}/stream`
     : `${API_URL}/tracks/${trackId}/stream`
@@ -691,6 +690,11 @@ export function useDirectPlaybackEngine({
       setConnectionStatus('paused', null)
     } else if (audio.paused) {
       const expectedPos = getExpectedPosition()
+      const nextUrl = normalizeMediaUrl(buildStreamUrl(trackId))
+      if (sourceUrlRef.current !== nextUrl || !!audio.error || !audio.currentSrc) {
+        void loadTrack(trackId, expectedPos >= 0 ? expectedPos : 0)
+        return
+      }
       if (expectedPos >= 0) {
         pendingTargetPositionRef.current = expectedPos
         applyTargetPosition(expectedPos, 'soft')

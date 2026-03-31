@@ -15,6 +15,10 @@ import {
   useRadioPlaybackEngine,
 } from '@/hooks/useRadioPlaybackEngine'
 
+const DIRECT_ONLY_DEPLOYMENT =
+  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
+const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
+
 interface PublicListenState {
   code: string
   name: string
@@ -51,7 +55,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   const volume = useAudioStore((s) => s.volume)
   const setAudioConnection = useStationStore((s) => s.setAudioConnection)
   const socket = getSocket()
-  const isDirectMode = (state.playbackMode ?? 'BROADCAST') === 'DIRECT'
+  const isDirectMode = (state.playbackMode ?? DEFAULT_PLAYBACK_MODE) === 'DIRECT'
 
   const broadcastPlayback = useRadioPlaybackEngine({
     streamUrl: isDirectMode ? null : state.streamUrl ?? null,
@@ -222,8 +226,14 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     let cancelled = false
 
     const refreshStreamUrl = async () => {
+      if (DIRECT_ONLY_DEPLOYMENT) return
       if (isDirectModeRef.current) return
       const info = await fetchStationStreamInfo(code).catch(() => null)
+      if (cancelled) return
+      if (info?.playbackMode === 'DIRECT') {
+        setState((prev) => ({ ...prev, streamUrl: null, playbackMode: 'DIRECT' }))
+        return
+      }
       if (cancelled || !info?.streamUrl) return
       setState((prev) => ({ ...prev, streamUrl: info.streamUrl }))
     }
@@ -233,7 +243,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
       const offsetMs = getServerOffsetMs(data.station?.serverTime ?? data.serverTime, Date.now())
       if (offsetMs !== null) serverOffsetMsRef.current = offsetMs
-      const nextPlaybackMode = data.station?.playbackMode ?? stateRef.current.playbackMode ?? 'BROADCAST'
+      const nextPlaybackMode = data.station?.playbackMode ?? stateRef.current.playbackMode ?? DEFAULT_PLAYBACK_MODE
       const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
 
       const targetPosition = getEstimatedServerPosition({
@@ -272,7 +282,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     const handleTrackChanged = (data: any) => {
       if (cancelled) return
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
-      const nextPlaybackMode = stateRef.current.playbackMode ?? 'BROADCAST'
+      const nextPlaybackMode = stateRef.current.playbackMode ?? DEFAULT_PLAYBACK_MODE
       const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
       const targetPosition = getEstimatedServerPosition({
         currentPosition: 0,
@@ -331,7 +341,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         serverOffsetMs: serverOffsetMsRef.current,
         trackStartedAt: startedAt,
       })
-      const nextIsDirectMode = (currentState.playbackMode ?? 'BROADCAST') === 'DIRECT'
+      const nextIsDirectMode = (currentState.playbackMode ?? DEFAULT_PLAYBACK_MODE) === 'DIRECT'
       const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null

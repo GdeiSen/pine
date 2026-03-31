@@ -19,6 +19,9 @@ const DIRECT_FORWARD_SYNC_CORRECTION_THRESHOLD_S = 1.1
 const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
 const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
+const DIRECT_ONLY_DEPLOYMENT =
+  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
+const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
 
 function normalizeLoopMode(value: unknown): 'none' | 'track' | 'queue' {
   if (value === 'track' || value === 'TRACK') return 'track'
@@ -57,7 +60,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     expiresAt: number
   } | null>(null)
 
-  const playbackMode = store.station?.playbackMode ?? 'BROADCAST'
+  const playbackMode = store.station?.playbackMode ?? DEFAULT_PLAYBACK_MODE
   const isDirectMode = playbackMode === 'DIRECT'
 
   const broadcastEngine = useRadioPlaybackEngine({
@@ -166,8 +169,17 @@ export function useStation(code: string, joinPassword?: string | null) {
     let cancelled = false
 
     const refreshStreamInfo = async () => {
+      const currentMode = useStationStore.getState().station?.playbackMode
+      if (DIRECT_ONLY_DEPLOYMENT || currentMode === 'DIRECT') {
+        setStationStreamUrl(null)
+        return
+      }
       const info = await fetchStationStreamInfo(code, true)
       if (cancelled) return
+      if (info?.playbackMode === 'DIRECT') {
+        setStationStreamUrl(null)
+        return
+      }
       if (info?.streamUrl) {
         setStationStreamUrl(info.streamUrl)
       }
@@ -189,6 +201,9 @@ export function useStation(code: string, joinPassword?: string | null) {
 
         const station = snapshot.station ?? snapshot
         setStation(station as any)
+        if ((station as { playbackMode?: 'DIRECT' | 'BROADCAST' } | null)?.playbackMode === 'DIRECT') {
+          setStationStreamUrl(null)
+        }
         setPlayback({
           currentTrack: snapshot.currentTrack as any ?? null,
           currentQueueType: snapshot.currentQueueType ?? null,
@@ -250,6 +265,9 @@ export function useStation(code: string, joinPassword?: string | null) {
       setStation(state.station)
       setQueue(state.queue ?? [])
       setMembers(state.members ?? [])
+      if (state.station?.playbackMode === 'DIRECT') {
+        setStationStreamUrl(null)
+      }
       setPlayback({
         currentTrack: state.currentTrack ?? null,
         currentQueueType: state.currentQueueType ?? null,

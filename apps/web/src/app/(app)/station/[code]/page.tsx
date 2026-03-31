@@ -75,6 +75,10 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
 const MAX_MEMBERS_ON_MAP = 10;
 const MAX_ADMINS_PER_STATION = 10;
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
+const DEFAULT_PLAYBACK_MODE =
+  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === "direct"
+    ? "DIRECT"
+    : "BROADCAST";
 const STACK_LAYOUT_TRANSITION = {
   type: "spring" as const,
   stiffness: 125,
@@ -815,7 +819,7 @@ export default function StationPage({
             listenerCount: guestListenState.listenerCount ?? 0,
             accessMode: guestListenState.accessMode,
             isPasswordProtected: guestListenState.isPasswordProtected,
-            playbackMode: guestListenState.playbackMode ?? "BROADCAST",
+            playbackMode: guestListenState.playbackMode ?? DEFAULT_PLAYBACK_MODE,
             currentTrackId: guestListenState.currentTrackId,
             currentTrack: guestListenState.currentTrack ?? null,
             currentPosition: guestListenState.currentPosition ?? 0,

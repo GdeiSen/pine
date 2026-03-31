@@ -10,9 +10,9 @@ export function resolveConfiguredOrigin(configuredUrl: string) {
   try {
     const configured = new URL(configuredUrl, window.location.origin)
     if (isLoopbackHost(configured.hostname) && !isLoopbackHost(window.location.hostname)) {
-      configured.protocol = window.location.protocol
-      configured.hostname = window.location.hostname
-      return configured.origin
+      // If a localhost-only URL leaks into a public build, prefer the
+      // current public origin instead of keeping an internal-only port.
+      return window.location.origin
     }
     return configured.origin
   } catch {

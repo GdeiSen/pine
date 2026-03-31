@@ -7,6 +7,7 @@ export interface StationStreamInfo {
   code: string
   streamUrl: string
   mountPath: string
+  playbackMode?: 'DIRECT' | 'BROADCAST'
   serverTime: string
   qualityHint: 'LOW' | 'MEDIUM' | 'HIGH'
   latencyHintMs: number
@@ -48,7 +49,7 @@ export async function fetchStationStreamInfo(
 
     // Docker-local safety: if backend returns relative mount (e.g. /live.mp3),
     // prefer explicit public stream URL to avoid hitting Next.js (3000) and getting 404.
-    if (data.streamUrl.startsWith('/')) {
+    if (data.streamUrl.startsWith('/') && data.playbackMode !== 'DIRECT') {
       const explicitPublicStream = process.env.NEXT_PUBLIC_STREAM_URL
       if (explicitPublicStream && /^https?:\/\//i.test(explicitPublicStream)) {
         data.streamUrl = explicitPublicStream

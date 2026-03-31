@@ -192,6 +192,7 @@ export class StationsService {
         code: true,
         ownerId: true,
         accessMode: true,
+        playbackMode: true,
         systemQueueMode: true,
         streamQuality: true,
       },
@@ -218,14 +219,27 @@ export class StationsService {
       }
     }
 
-    const { mountPath, streamUrl } = this.buildStreamEndpoints(station.code)
     const playback = await this.ensurePlaybackState(station.id, station.systemQueueMode)
+    const playbackMode = this.resolvePlaybackMode(
+      (station.playbackMode as StationPlaybackMode | undefined) ?? StationPlaybackMode.DIRECT,
+    )
+    const directTrackPath = playback.currentTrackId
+      ? `/api/tracks/${playback.currentTrackId}/stream`
+      : ''
+    const { mountPath, streamUrl } =
+      playbackMode === StationPlaybackMode.DIRECT
+        ? {
+            mountPath: directTrackPath,
+            streamUrl: directTrackPath,
+          }
+        : this.buildStreamEndpoints(station.code)
 
     return {
       stationId: station.id,
       code: station.code,
       streamUrl,
       mountPath,
+      playbackMode,
       serverTime: new Date().toISOString(),
       qualityHint: station.streamQuality,
       latencyHintMs: this.estimateLatencyHintMs(station.streamQuality),
