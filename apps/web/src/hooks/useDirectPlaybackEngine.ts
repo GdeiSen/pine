@@ -65,6 +65,18 @@ function isPlaybackAbort(error: unknown) {
   return name === 'AbortError'
 }
 
+function isAuthoritativeDirectSyncType(syncType: string) {
+  return (
+    syncType === 'command:play' ||
+    syncType === 'command:pause' ||
+    syncType === 'command:seek' ||
+    syncType === 'reconnect' ||
+    syncType === 'manual-resync' ||
+    syncType === 'manual-restart' ||
+    syncType === 'recovery'
+  )
+}
+
 function clampVolume(value: number) {
   if (!Number.isFinite(value)) return 1
   if (value < 0) return 0
@@ -883,21 +895,22 @@ export function useDirectPlaybackEngine({
     (args: { targetPosition: number; actualPosition: number | null; syncType: string; rttMs: number | null }) => {
       const audio = audioRef.current
       const pauseFadeInFlight = isPaused && !!audio && !audio.paused
+      const syncType = args.syncType.toLowerCase()
+      const authoritativeSync = isAuthoritativeDirectSyncType(syncType)
       const withinOpeningGraceWindow =
         Date.now() - lastTrackLoadAtRef.current < TRACK_START_STABILIZE_MS &&
         args.targetPosition <= TRACK_OPENING_GRACE_S &&
         (args.actualPosition ?? 0) <= TRACK_OPENING_GRACE_S &&
         args.targetPosition >= (args.actualPosition ?? 0)
       if (!pauseFadeInFlight && audio && audio.readyState >= 1 && Number.isFinite(args.targetPosition)) {
-        const syncType = args.syncType.toLowerCase()
         const strictSync =
           isPaused ||
           syncType === 'command:pause' ||
           (syncType === 'command:seek' && isPaused)
-        if (!withinOpeningGraceWindow || strictSync) {
+        if (authoritativeSync && (!withinOpeningGraceWindow || strictSync)) {
           applyTargetPosition(args.targetPosition, strictSync ? 'strict' : 'soft')
         }
-      } else if (!pauseFadeInFlight) {
+      } else if (!pauseFadeInFlight && authoritativeSync) {
         // Fall back to the engine state if the sync sample does not carry a usable target.
         seekToExpectedPosition()
       }

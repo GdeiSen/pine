@@ -15,7 +15,6 @@ import { useDirectPlaybackEngine } from './useDirectPlaybackEngine'
 
 const TIME_SYNC_INTERVAL_MS = 15_000
 const TIME_SYNC_EMA_ALPHA = 0.2
-const DIRECT_FORWARD_SYNC_CORRECTION_THRESHOLD_S = 1.1
 const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
 const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
@@ -596,24 +595,21 @@ export function useStation(code: string, joinPassword?: string | null) {
       const directAudio = stationPlaybackMode === 'DIRECT' ? activeAudio.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
-      const useActualDirectClock =
+      const requiresAuthoritativeDirectSync =
         stationPlaybackMode === 'DIRECT' &&
-        !resolvedIsPaused &&
-        !freezePositionWhileReconnecting &&
-        commandType !== PlaybackCommandType.SEEK &&
-        directActualPosition !== null &&
-        activeAudio.audioConnectionState === 'playing'
-      const directForwardDriftSeconds =
-        useActualDirectClock && directActualPosition !== null ? targetPosition - directActualPosition : 0
-      const shouldForceForwardSync =
-        useActualDirectClock &&
-        commandType !== PlaybackCommandType.PLAY &&
-        directForwardDriftSeconds > DIRECT_FORWARD_SYNC_CORRECTION_THRESHOLD_S
-      let resolvedPosition = useActualDirectClock
-        ? shouldForceForwardSync
-          ? targetPosition
-          : directActualPosition
-        : targetPosition
+        (freezePositionWhileReconnecting ||
+          resolvedIsPaused ||
+          activeAudio.audioConnectionState !== 'playing' ||
+          commandType === PlaybackCommandType.PLAY ||
+          commandType === PlaybackCommandType.PAUSE ||
+          commandType === PlaybackCommandType.SEEK)
+      let resolvedTrackStartedAt = nextTrackStartedAt
+      let resolvedPosition =
+        stationPlaybackMode === 'DIRECT' &&
+        !requiresAuthoritativeDirectSync &&
+        directActualPosition !== null
+          ? directActualPosition
+          : targetPosition
 
       if (stationPlaybackMode === 'DIRECT') {
         const directAnchorPosition =
@@ -623,15 +619,15 @@ export function useStation(code: string, joinPassword?: string | null) {
             : null)
 
         if (
-          !freezePositionWhileReconnecting &&
+          !requiresAuthoritativeDirectSync &&
           directAnchorPosition !== null &&
-          commandType !== PlaybackCommandType.SEEK &&
           !resolvedIsPaused &&
           !pauseIntentActive
         ) {
-          // In DIRECT mode keep UI position locked to local media clock to avoid visible jumps
-          // from late/out-of-order websocket sync samples.
+          // In DIRECT mode regular websocket sync ticks are informational only.
+          // Keep the player's local clock as the source of truth while it is already playing.
           resolvedPosition = directAnchorPosition
+          resolvedTrackStartedAt = playbackState.trackStartedAt
         }
 
         if (
@@ -665,7 +661,7 @@ export function useStation(code: string, joinPassword?: string | null) {
         currentPosition: resolvedPosition,
         isPaused: resolvedIsPaused,
         isPlaying: !!playbackState.currentTrack && !resolvedIsPaused,
-        trackStartedAt: nextTrackStartedAt,
+        trackStartedAt: resolvedTrackStartedAt,
         ...(data.currentQueueType !== undefined && { currentQueueType: data.currentQueueType }),
         ...(data.loopMode !== undefined && { loopMode: normalizeLoopMode(data.loopMode) }),
         ...(data.shuffleEnabled !== undefined && { shuffleEnabled: data.shuffleEnabled }),
@@ -697,12 +693,14 @@ export function useStation(code: string, joinPassword?: string | null) {
         seekIntentRef.current = null
       }
 
-      activeAudio.reportDrift({
-        targetPosition: resolvedPosition,
-        actualPosition: directActualPosition ?? activeAudio.audioRef.current?.currentTime ?? null,
-        syncType,
-        rttMs: typeof data.rttMs === 'number' ? data.rttMs : null,
-      })
+      if (stationPlaybackMode !== 'DIRECT' || requiresAuthoritativeDirectSync) {
+        activeAudio.reportDrift({
+          targetPosition: resolvedPosition,
+          actualPosition: directActualPosition ?? activeAudio.audioRef.current?.currentTime ?? null,
+          syncType,
+          rttMs: typeof data.rttMs === 'number' ? data.rttMs : null,
+        })
+      }
 
     }
     socket.on(WS_EVENTS_V2.PLAYBACK_SYNC, handlePlaybackSync)

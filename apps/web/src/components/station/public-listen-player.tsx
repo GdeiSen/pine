@@ -517,20 +517,29 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
+      const requiresAuthoritativeDirectSync =
+        nextIsDirectMode &&
+        (nextIsPaused ||
+          playbackRef.current.audioConnectionState !== 'playing' ||
+          commandType === PlaybackCommandType.PLAY ||
+          commandType === PlaybackCommandType.PAUSE ||
+          commandType === PlaybackCommandType.SEEK)
       const position =
         nextIsDirectMode &&
-        !nextIsPaused &&
-        commandType !== 'SEEK' &&
-        directActualPosition !== null &&
-        playbackRef.current.audioConnectionState === 'playing'
-          ? Math.max(targetPosition, directActualPosition)
+        !requiresAuthoritativeDirectSync &&
+        directActualPosition !== null
+          ? directActualPosition
           : targetPosition
+      const nextTrackStartedAt =
+        nextIsDirectMode && !requiresAuthoritativeDirectSync && !nextIsPaused
+          ? currentState.trackStartedAt ?? null
+          : data.trackStartedAt ?? currentState.trackStartedAt ?? null
 
       setState((prev) => ({
         ...prev,
         currentPosition: position,
         isPaused: nextIsPaused,
-        trackStartedAt: data.trackStartedAt ?? prev.trackStartedAt ?? null,
+        trackStartedAt: nextTrackStartedAt,
       }))
 
       const resolvedPendingDirectCommand = getPendingDirectCommand()
@@ -550,12 +559,14 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         }
       }
 
-      playbackRef.current.reportDrift({
-        targetPosition: position,
-        actualPosition: directActualPosition ?? playbackRef.current.audioRef.current?.currentTime ?? null,
-        syncType: commandType ? `command:${commandType.toLowerCase()}` : 'ws-sync',
-        rttMs: null,
-      })
+      if (!nextIsDirectMode || requiresAuthoritativeDirectSync) {
+        playbackRef.current.reportDrift({
+          targetPosition: position,
+          actualPosition: directActualPosition ?? playbackRef.current.audioRef.current?.currentTime ?? null,
+          syncType: commandType ? `command:${commandType.toLowerCase()}` : 'ws-sync',
+          rttMs: null,
+        })
+      }
     }
     socket.on(WS_EVENTS_V2.PLAYBACK_SYNC, handlePlaybackSync)
 
@@ -596,7 +607,20 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   }, [code])
 
   if (!state.currentTrackId || !state.currentTrack) {
-    return <p className="text-xs text-[--text-muted] mt-6">Nothing is playing right now.</p>
+    return (
+      <div className="mt-2 w-full">
+        <div
+          className="min-h-[320px] flex items-center justify-center px-6"
+          style={{
+            borderRadius: 16,
+            overflow: 'hidden',
+            background: 'var(--bg-elevated)',
+          }}
+        >
+          <p className="text-xs text-[--text-muted] text-center">Nothing is playing right now.</p>
+        </div>
+      </div>
+    )
   }
 
   return (
