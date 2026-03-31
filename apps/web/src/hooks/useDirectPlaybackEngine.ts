@@ -10,7 +10,6 @@ const DRIFT_THRESHOLD_S = 2.5
 const DRIFT_CORRECTION_INTERVAL_MS = 5_000
 const STRICT_ALIGN_THRESHOLD_S = 0.05
 const SOFT_ALIGN_THRESHOLD_S = 0.35
-const TRANSITION_GUARD_MS = 2_500
 const RESUME_SYNC_GRACE_MS = 1_100
 const RESUME_SYNC_SOFT_FORWARD_LIMIT_S = 1.15
 const TRACK_START_STABILIZE_MS = 1_400
@@ -353,6 +352,21 @@ export function useDirectPlaybackEngine({
       }
     },
     [armResumeSyncGrace, fadeInToTargetVolume, setConnectionStatus, setNeedsRestart, stopVolumeFade],
+  )
+
+  const beginCommandWait = useCallback(
+    (message = 'Waiting for server confirmation...') => {
+      playTokenRef.current += 1
+      clearResumeSyncGrace()
+      clearStallRecovery(true)
+      const audio = audioRef.current
+      if (audio) {
+        stopVolumeFade()
+        audio.pause()
+      }
+      setConnectionStatus('connecting', message)
+    },
+    [clearResumeSyncGrace, clearStallRecovery, setConnectionStatus, stopVolumeFade],
   )
 
   const loadTrack = useCallback(
@@ -791,44 +805,24 @@ export function useDirectPlaybackEngine({
     void loadTrack(trackId, targetPosition >= 0 ? targetPosition : 0)
   }, [clearResumeSyncGrace, clearTransitionState, getExpectedPosition, loadTrack, trackId])
 
+  const finishTransition = useCallback(() => {
+    clearTransitionState()
+  }, [clearTransitionState])
+
   const beginTransition = useCallback(
     (message = 'Switching track...') => {
       const transitionTrackId = desiredStateRef.current.trackId ?? currentTrackIdRef.current
       transitionGuardRef.current = {
         trackId: transitionTrackId,
-        expiresAt: Date.now() + TRANSITION_GUARD_MS,
+        expiresAt: Number.POSITIVE_INFINITY,
       }
       if (transitionTimerRef.current !== null) {
         window.clearTimeout(transitionTimerRef.current)
+        transitionTimerRef.current = null
       }
-      transitionTimerRef.current = window.setTimeout(() => {
-        const guard = transitionGuardRef.current
-        if (!guard) return
-        const desired = desiredStateRef.current
-        const shouldResume = guard.trackId !== null && desired.trackId === guard.trackId && !desired.isPaused
-        clearTransitionState()
-        if (shouldResume) {
-          void startPlayback('Resuming track...', { withResumeGrace: true })
-        }
-      }, TRANSITION_GUARD_MS)
-      playTokenRef.current += 1
-      clearResumeSyncGrace()
-      clearStallRecovery(true)
-      const audio = audioRef.current
-      if (audio) {
-        stopVolumeFade()
-        audio.pause()
-      }
-      setConnectionStatus('connecting', message)
+      beginCommandWait(message)
     },
-    [
-      clearResumeSyncGrace,
-      clearStallRecovery,
-      clearTransitionState,
-      setConnectionStatus,
-      startPlayback,
-      stopVolumeFade,
-    ],
+    [beginCommandWait],
   )
 
   const reportDrift = useCallback(
@@ -868,6 +862,8 @@ export function useDirectPlaybackEngine({
     audioDiagnostics,
     audioNeedsRestart,
     beginTransition,
+    beginCommandWait,
+    finishTransition,
     restartAudio,
     reportDrift,
   }

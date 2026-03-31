@@ -481,6 +481,8 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
   }, [attemptPlayback, clearTimers, fadeInToTargetVolume, setConnectionStatus, stopVolumeFade])
 
   const beginTransition = useCallback(() => {}, [])
+  const beginCommandWait = useCallback(() => {}, [])
+  const finishTransition = useCallback(() => {}, [])
 
   return {
     audioNeedsRestart,
@@ -489,6 +491,8 @@ export function useRadioPlaybackEngine({ streamUrl, isPlaying, volume }: UseRadi
     audioDiagnostics,
     audioRef,
     beginTransition,
+    beginCommandWait,
+    finishTransition,
     reportDrift,
     restartAudio,
   }

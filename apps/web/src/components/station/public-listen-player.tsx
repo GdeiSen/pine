@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { WS_EVENTS_V2 } from '@web-radio/shared'
+import { PlaybackCommandType, PlaybackEventType, WS_EVENTS_V2 } from '@web-radio/shared'
 import { ListenOnlyPlayerCard } from '@/components/station/listen-only-player-card'
 import { useAudioStore } from '@/stores/audio.store'
 import { useStationStore } from '@/stores/station.store'
@@ -18,6 +18,7 @@ import {
 const DIRECT_ONLY_DEPLOYMENT =
   process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
 const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
+const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
 
 interface PublicListenState {
   code: string
@@ -88,9 +89,67 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   const playbackRef = useRef(playback)
   const isDirectModeRef = useRef(isDirectMode)
   const autoRestartTrackIdRef = useRef<string | null>(null)
+  const pendingDirectCommandRef = useRef<{
+    type: PlaybackCommandType
+    trackIdBefore: string | null
+    expiresAt: number
+  } | null>(null)
   stateRef.current = state
   playbackRef.current = playback
   isDirectModeRef.current = isDirectMode
+
+  const getPendingDirectCommand = () => {
+    const pending = pendingDirectCommandRef.current
+    if (!pending) return null
+    if (Date.now() <= pending.expiresAt) return pending
+    if (
+      pending.type === PlaybackCommandType.SKIP ||
+      pending.type === PlaybackCommandType.PREVIOUS
+    ) {
+      playbackRef.current.finishTransition()
+    }
+    pendingDirectCommandRef.current = null
+    return null
+  }
+
+  const clearPendingDirectCommand = (options?: { finishTransition?: boolean }) => {
+    const pending = pendingDirectCommandRef.current
+    if (
+      pending &&
+      options?.finishTransition &&
+      (pending.type === PlaybackCommandType.SKIP || pending.type === PlaybackCommandType.PREVIOUS)
+    ) {
+      playbackRef.current.finishTransition()
+    }
+    pendingDirectCommandRef.current = null
+  }
+
+  const beginDirectCommandWait = (commandType: PlaybackCommandType, trackIdBefore?: string | null) => {
+    if (!isDirectModeRef.current) return
+
+    pendingDirectCommandRef.current = {
+      type: commandType,
+      trackIdBefore: trackIdBefore ?? stateRef.current.currentTrackId ?? null,
+      expiresAt: Date.now() + DIRECT_COMMAND_WAIT_TIMEOUT_MS,
+    }
+
+    switch (commandType) {
+      case PlaybackCommandType.SKIP:
+        playbackRef.current.beginTransition('Switching to next track...')
+        break
+      case PlaybackCommandType.PREVIOUS:
+        playbackRef.current.beginTransition('Switching to previous track...')
+        break
+      case PlaybackCommandType.PLAY:
+        playbackRef.current.beginCommandWait('Waiting for playback confirmation...')
+        break
+      case PlaybackCommandType.PAUSE:
+        playbackRef.current.beginCommandWait('Waiting for pause confirmation...')
+        break
+      default:
+        break
+    }
+  }
 
   useEffect(() => {
     setAudioConnection({
@@ -172,8 +231,23 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     const timer = window.setInterval(() => {
       setState((prev) => {
         if (!prev.currentTrackId || !prev.currentTrack) return prev
+        const pendingDirectCommand = pendingDirectCommandRef.current
+        if (pendingDirectCommand && Date.now() > pendingDirectCommand.expiresAt) {
+          if (
+            pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            pendingDirectCommand.type === PlaybackCommandType.PREVIOUS
+          ) {
+            playbackRef.current.finishTransition()
+          }
+          pendingDirectCommandRef.current = null
+        }
+        const pendingDirectActive =
+          !!pendingDirectCommandRef.current && Date.now() <= pendingDirectCommandRef.current.expiresAt
 
         if (isDirectModeRef.current) {
+          if (pendingDirectActive) {
+            return prev
+          }
           const directAudio = playbackRef.current.audioRef.current
           if (
             prev.isPaused ||
@@ -276,6 +350,21 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         isPaused: data.isPaused ?? false,
         trackStartedAt: data.trackStartedAt ?? null,
       }))
+
+      const pendingDirectCommand = getPendingDirectCommand()
+      if (nextIsDirectMode && pendingDirectCommand) {
+        const nextTrackId = data.currentTrack?.id ?? null
+        const resolvedTrackChange =
+          (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            pendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+          nextTrackId !== pendingDirectCommand.trackIdBefore
+        const resolvedPlayPause =
+          (pendingDirectCommand.type === PlaybackCommandType.PLAY && !(data.isPaused ?? false)) ||
+          (pendingDirectCommand.type === PlaybackCommandType.PAUSE && !!data.isPaused)
+        if (resolvedTrackChange || resolvedPlayPause) {
+          clearPendingDirectCommand({ finishTransition: resolvedTrackChange })
+        }
+      }
     }
     socket.on(WS_EVENTS_V2.STATION_STATE, handleStationState)
 
@@ -284,6 +373,8 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
       const nextPlaybackMode = stateRef.current.playbackMode ?? DEFAULT_PLAYBACK_MODE
       const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
+      const previousTrackId = stateRef.current.currentTrackId ?? null
+      const commandType = typeof data.commandType === 'string' ? data.commandType : null
       const targetPosition = getEstimatedServerPosition({
         currentPosition: 0,
         duration: data.track?.duration ?? 0,
@@ -312,8 +403,29 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         trackStartedAt: data.trackStartedAt ?? null,
       }))
 
+      const nextTrackId = data.track?.id ?? null
+      const pendingDirectCommand = getPendingDirectCommand()
+      if (nextIsDirectMode && pendingDirectCommand) {
+        const resolvedTrackChange =
+          (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            pendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+          (commandType === pendingDirectCommand.type ||
+            nextTrackId !== pendingDirectCommand.trackIdBefore)
+
+        if (resolvedTrackChange) {
+          const sameTrackTransition =
+            !!nextTrackId && nextTrackId === pendingDirectCommand.trackIdBefore
+          clearPendingDirectCommand({ finishTransition: true })
+          if (sameTrackTransition) {
+            void playbackRef.current.restartAudio()
+          }
+        }
+      }
+
       if (!nextIsDirectMode && data.track?.id) {
         void playbackRef.current.restartAudio()
+      } else if (nextIsDirectMode && nextTrackId && nextTrackId !== previousTrackId) {
+        clearPendingDirectCommand()
       }
     }
     socket.on(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)
@@ -321,6 +433,37 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     const handlePlaybackSync = (data: any) => {
       if (cancelled) return
       const currentState = stateRef.current
+      const commandType = typeof data.commandType === 'string' ? data.commandType : null
+      const syncEventType = typeof data.type === 'string' ? data.type : null
+      const nextIsDirectMode = (currentState.playbackMode ?? DEFAULT_PLAYBACK_MODE) === 'DIRECT'
+
+      if (
+        nextIsDirectMode &&
+        syncEventType === PlaybackEventType.COMMAND_RECEIVED &&
+        commandType &&
+        (commandType === PlaybackCommandType.PLAY ||
+          commandType === PlaybackCommandType.PAUSE ||
+          commandType === PlaybackCommandType.SKIP ||
+          commandType === PlaybackCommandType.PREVIOUS)
+      ) {
+        beginDirectCommandWait(commandType, currentState.currentTrackId ?? null)
+        return
+      }
+
+      const pendingDirectCommand = getPendingDirectCommand()
+      const hasAuthoritativeTrackId =
+        typeof data.currentTrackId === 'string' || data.currentTrackId === null
+      const syncTrackId = hasAuthoritativeTrackId ? data.currentTrackId : currentState.currentTrackId ?? null
+      if (
+        nextIsDirectMode &&
+        pendingDirectCommand &&
+        (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+          pendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+        syncTrackId === pendingDirectCommand.trackIdBefore
+      ) {
+        return
+      }
+
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt) ?? normalizeTrackStartedAt(currentState.trackStartedAt)
       const nextIsPaused = data.isPaused ?? currentState.isPaused ?? false
       const currentDuration =
@@ -341,11 +484,9 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         serverOffsetMs: serverOffsetMsRef.current,
         trackStartedAt: startedAt,
       })
-      const nextIsDirectMode = (currentState.playbackMode ?? DEFAULT_PLAYBACK_MODE) === 'DIRECT'
       const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
-      const commandType = typeof data.commandType === 'string' ? data.commandType : null
       const position =
         nextIsDirectMode &&
         !nextIsPaused &&
@@ -361,6 +502,23 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         isPaused: nextIsPaused,
         trackStartedAt: data.trackStartedAt ?? prev.trackStartedAt ?? null,
       }))
+
+      const resolvedPendingDirectCommand = getPendingDirectCommand()
+      if (nextIsDirectMode && resolvedPendingDirectCommand) {
+        const resolvedTrackChange =
+          (resolvedPendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            resolvedPendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+          syncTrackId !== resolvedPendingDirectCommand.trackIdBefore
+        const resolvedPlayPause =
+          (resolvedPendingDirectCommand.type === PlaybackCommandType.PLAY && !nextIsPaused) ||
+          (resolvedPendingDirectCommand.type === PlaybackCommandType.PAUSE && nextIsPaused)
+
+        if (resolvedTrackChange) {
+          clearPendingDirectCommand({ finishTransition: true })
+        } else if (resolvedPlayPause) {
+          clearPendingDirectCommand()
+        }
+      }
 
       playbackRef.current.reportDrift({
         targetPosition: position,
@@ -394,6 +552,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
     return () => {
       cancelled = true
+      pendingDirectCommandRef.current = null
       socket.emit(WS_EVENTS_V2.STATION_LEAVE)
       socket.off(WS_EVENTS_V2.STATION_STATE, handleStationState)
       socket.off(WS_EVENTS_V2.TRACK_CHANGED, handleTrackChanged)

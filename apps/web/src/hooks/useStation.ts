@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useRef } from 'react'
-import { PlaybackCommandType, WS_EVENTS_V2 } from '@web-radio/shared'
+import { PlaybackCommandType, PlaybackEventType, WS_EVENTS_V2 } from '@web-radio/shared'
 import { getSocket } from '@/lib/socket'
 import api, { fetchStationStreamInfo } from '@/lib/api'
 import { useStationStore } from '@/stores/station.store'
@@ -19,6 +19,7 @@ const DIRECT_FORWARD_SYNC_CORRECTION_THRESHOLD_S = 1.1
 const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
 const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
+const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
 const DIRECT_ONLY_DEPLOYMENT =
   process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
 const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
@@ -59,6 +60,11 @@ export function useStation(code: string, joinPassword?: string | null) {
     targetPosition: number
     expiresAt: number
   } | null>(null)
+  const pendingDirectCommandRef = useRef<{
+    type: PlaybackCommandType
+    trackIdBefore: string | null
+    expiresAt: number
+  } | null>(null)
 
   const playbackMode = store.station?.playbackMode ?? DEFAULT_PLAYBACK_MODE
   const isDirectMode = playbackMode === 'DIRECT'
@@ -81,6 +87,65 @@ export function useStation(code: string, joinPassword?: string | null) {
   const audio = isDirectMode ? directEngine : broadcastEngine
   const activeAudioRef = useRef(audio)
   activeAudioRef.current = audio
+
+  const getPendingDirectCommand = useCallback(() => {
+    const pending = pendingDirectCommandRef.current
+    if (!pending) return null
+    if (Date.now() <= pending.expiresAt) return pending
+    if (
+      pending.type === PlaybackCommandType.SKIP ||
+      pending.type === PlaybackCommandType.PREVIOUS
+    ) {
+      activeAudioRef.current.finishTransition()
+    }
+    pendingDirectCommandRef.current = null
+    return null
+  }, [])
+
+  const clearPendingDirectCommand = useCallback((options?: { finishTransition?: boolean }) => {
+    const pending = pendingDirectCommandRef.current
+    if (
+      pending &&
+      options?.finishTransition &&
+      (pending.type === PlaybackCommandType.SKIP || pending.type === PlaybackCommandType.PREVIOUS)
+    ) {
+      activeAudioRef.current.finishTransition()
+    }
+    pendingDirectCommandRef.current = null
+  }, [])
+
+  const beginDirectCommandWait = useCallback(
+    (commandType: PlaybackCommandType, trackIdBefore?: string | null) => {
+      const state = useStationStore.getState()
+      if (state.station?.playbackMode !== 'DIRECT') return
+
+      pendingDirectCommandRef.current = {
+        type: commandType,
+        trackIdBefore: trackIdBefore ?? state.playback.currentTrack?.id ?? null,
+        expiresAt: Date.now() + DIRECT_COMMAND_WAIT_TIMEOUT_MS,
+      }
+
+      switch (commandType) {
+        case PlaybackCommandType.SKIP:
+          activeAudioRef.current.beginTransition('Switching to next track...')
+          break
+        case PlaybackCommandType.PREVIOUS:
+          activeAudioRef.current.beginTransition('Switching to previous track...')
+          break
+        case PlaybackCommandType.PLAY:
+          activeAudioRef.current.beginCommandWait('Waiting for playback confirmation...')
+          break
+        case PlaybackCommandType.PAUSE:
+          activeAudioRef.current.beginCommandWait('Waiting for pause confirmation...')
+          break
+        default:
+          break
+      }
+
+      localTickAnchorRef.current = Date.now()
+    },
+    [],
+  )
   const effectiveTrackDuration = useMemo(() => {
     const metadataDuration = store.playback.currentTrack?.duration ?? 0
     if (!isDirectMode) return metadataDuration
@@ -248,13 +313,14 @@ export function useStation(code: string, joinPassword?: string | null) {
       window.clearTimeout(initialSyncTimeout)
       const startedAt = normalizeTrackStartedAt(state.trackStartedAt)
       const nextTrackId = state.currentTrack?.id ?? null
+      const nextIsPaused = state.isPaused ?? false
       const nextPosition = getEstimatedServerPosition({
         currentPosition:
           typeof state.currentPosition === 'number' && Number.isFinite(state.currentPosition)
             ? Math.max(0, state.currentPosition)
             : 0,
         duration: state.currentTrack?.duration ?? 0,
-        isPaused: state.isPaused ?? false,
+        isPaused: nextIsPaused,
         pausedPosition:
           typeof state.currentPosition === 'number' && Number.isFinite(state.currentPosition)
             ? Math.max(0, state.currentPosition)
@@ -271,11 +337,24 @@ export function useStation(code: string, joinPassword?: string | null) {
       setPlayback({
         currentTrack: state.currentTrack ?? null,
         currentQueueType: state.currentQueueType ?? null,
-        isPaused: state.isPaused ?? false,
+        isPaused: nextIsPaused,
         trackStartedAt: startedAt,
         currentPosition: nextPosition,
-        isPlaying: !!state.currentTrack && !state.isPaused,
+        isPlaying: !!state.currentTrack && !nextIsPaused,
       })
+      const pendingDirectCommand = getPendingDirectCommand()
+      if (state.station?.playbackMode === 'DIRECT' && pendingDirectCommand) {
+        const resolvedTrackChange =
+          (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            pendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+          nextTrackId !== pendingDirectCommand.trackIdBefore
+        const resolvedPlayPause =
+          (pendingDirectCommand.type === PlaybackCommandType.PLAY && !nextIsPaused) ||
+          (pendingDirectCommand.type === PlaybackCommandType.PAUSE && nextIsPaused)
+        if (resolvedTrackChange || resolvedPlayPause) {
+          clearPendingDirectCommand({ finishTransition: resolvedTrackChange })
+        }
+      }
       if (!nextTrackId) {
         pendingTrackSyncRef.current = null
         playPauseIntentRef.current = null
@@ -293,8 +372,11 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     const handleTrackChanged = (data: any) => {
       const activeAudio = activeAudioRef.current
+      const stationPlaybackMode = useStationStore.getState().station?.playbackMode
       const previousTrackId = useStationStore.getState().playback.currentTrack?.id ?? null
       const nextTrack = data.track ?? null
+      const commandType =
+        typeof data.commandType === 'string' ? data.commandType : null
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
       const nextPosition = getEstimatedServerPosition({
         currentPosition:
@@ -321,12 +403,29 @@ export function useStation(code: string, joinPassword?: string | null) {
       })
       localTickAnchorRef.current = Date.now()
       const nextTrackId = nextTrack?.id ?? null
+      const pendingDirectCommand = getPendingDirectCommand()
+      if (stationPlaybackMode === 'DIRECT' && pendingDirectCommand) {
+        const resolvedTrackChange =
+          (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            pendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+          (commandType === pendingDirectCommand.type ||
+            nextTrackId !== pendingDirectCommand.trackIdBefore)
+
+        if (resolvedTrackChange) {
+          const sameTrackTransition =
+            !!nextTrackId && nextTrackId === pendingDirectCommand.trackIdBefore
+          clearPendingDirectCommand({ finishTransition: true })
+          if (sameTrackTransition) {
+            void activeAudio.restartAudio()
+          }
+        }
+      }
       if (nextTrackId && nextTrackId !== previousTrackId) {
         playPauseIntentRef.current = null
         seekIntentRef.current = null
         pendingTrackSyncRef.current = { trackId: nextTrackId, sinceMs: Date.now() }
         // BROADCAST mode needs an explicit audio restart; DIRECT mode reloads via trackId change
-        if (useStationStore.getState().station?.playbackMode !== 'DIRECT') {
+        if (stationPlaybackMode !== 'DIRECT') {
           void activeAudio.restartAudio()
         }
       } else if (!nextTrackId) {
@@ -348,11 +447,47 @@ export function useStation(code: string, joinPassword?: string | null) {
       const stationPlaybackMode = state.station?.playbackMode
       const playbackState = state.playback
       const currentTrackId = playbackState.currentTrack?.id
+      const commandType =
+        typeof data.commandType === 'string' ? data.commandType : null
+      const syncEventType =
+        typeof data.type === 'string' ? data.type : null
+
+      if (
+        stationPlaybackMode === 'DIRECT' &&
+        syncEventType === PlaybackEventType.COMMAND_RECEIVED &&
+        commandType &&
+        (commandType === PlaybackCommandType.PLAY ||
+          commandType === PlaybackCommandType.PAUSE ||
+          commandType === PlaybackCommandType.SKIP ||
+          commandType === PlaybackCommandType.PREVIOUS)
+      ) {
+        beginDirectCommandWait(commandType, currentTrackId ?? null)
+        if (Array.isArray(data?.queue)) {
+          setQueue(data.queue)
+        }
+        return
+      }
+
       if (data.currentTrackId && data.currentTrackId !== currentTrackId) {
         void refreshStationSnapshot()
         return
       }
-      const syncTrackId = typeof data.currentTrackId === 'string' ? data.currentTrackId : null
+      const pendingDirectCommand = getPendingDirectCommand()
+      const hasAuthoritativeTrackId =
+        typeof data.currentTrackId === 'string' || data.currentTrackId === null
+      const syncTrackId = hasAuthoritativeTrackId ? data.currentTrackId : currentTrackId ?? null
+      if (
+        stationPlaybackMode === 'DIRECT' &&
+        pendingDirectCommand &&
+        (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+          pendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+        syncTrackId === pendingDirectCommand.trackIdBefore
+      ) {
+        if (Array.isArray(data?.queue)) {
+          setQueue(data.queue)
+        }
+        return
+      }
       const pending = pendingTrackSyncRef.current
       const pendingActive =
         !!pending &&
@@ -367,8 +502,6 @@ export function useStation(code: string, joinPassword?: string | null) {
         typeof data.isPaused === 'boolean' ? data.isPaused : playbackState.isPaused
       const nextTrackStartedAt =
         normalizeTrackStartedAt(data.trackStartedAt) ?? playbackState.trackStartedAt
-      const commandType =
-        typeof data.commandType === 'string' ? data.commandType : null
       const intent = playPauseIntentRef.current
       const intentActive =
         !!intent &&
@@ -383,8 +516,13 @@ export function useStation(code: string, joinPassword?: string | null) {
       let clearSeekIntentAfterSync = false
 
       let resolvedIsPaused = nextIsPaused
+      const strictDirectCommandPending =
+        stationPlaybackMode === 'DIRECT' &&
+        !!pendingDirectCommand &&
+        (pendingDirectCommand.type === PlaybackCommandType.PLAY ||
+          pendingDirectCommand.type === PlaybackCommandType.PAUSE)
 
-      if (intentActive && intent) {
+      if (intentActive && intent && !strictDirectCommandPending) {
         const commandMatchesIntent =
           (intent.action === 'play' && commandType === PlaybackCommandType.PLAY) ||
           (intent.action === 'pause' && commandType === PlaybackCommandType.PAUSE)
@@ -515,6 +653,22 @@ export function useStation(code: string, joinPassword?: string | null) {
       if (Array.isArray(data?.queue)) {
         setQueue(data.queue)
       }
+      const resolvedPendingDirectCommand = getPendingDirectCommand()
+      if (stationPlaybackMode === 'DIRECT' && resolvedPendingDirectCommand) {
+        const resolvedTrackChange =
+          (resolvedPendingDirectCommand.type === PlaybackCommandType.SKIP ||
+            resolvedPendingDirectCommand.type === PlaybackCommandType.PREVIOUS) &&
+          syncTrackId !== resolvedPendingDirectCommand.trackIdBefore
+        const resolvedPlayPause =
+          (resolvedPendingDirectCommand.type === PlaybackCommandType.PLAY && !resolvedIsPaused) ||
+          (resolvedPendingDirectCommand.type === PlaybackCommandType.PAUSE && resolvedIsPaused)
+
+        if (resolvedTrackChange) {
+          clearPendingDirectCommand({ finishTransition: true })
+        } else if (resolvedPlayPause) {
+          clearPendingDirectCommand()
+        }
+      }
       if (clearIntentAfterSync) {
         playPauseIntentRef.current = null
       }
@@ -616,8 +770,24 @@ export function useStation(code: string, joinPassword?: string | null) {
         !!currentTrack &&
         pending.trackId === currentTrack.id &&
         audioConnectionState !== 'playing'
+      const pendingDirectCommand = pendingDirectCommandRef.current
+      if (pendingDirectCommand && Date.now() > pendingDirectCommand.expiresAt) {
+        if (
+          pendingDirectCommand.type === PlaybackCommandType.SKIP ||
+          pendingDirectCommand.type === PlaybackCommandType.PREVIOUS
+        ) {
+          activeAudioRef.current.finishTransition()
+        }
+        pendingDirectCommandRef.current = null
+      }
+      const pendingDirectActive =
+        !!pendingDirectCommandRef.current && Date.now() <= pendingDirectCommandRef.current.expiresAt
       if (pending && !pendingActive) {
         pendingTrackSyncRef.current = null
+      }
+      if (pendingDirectActive && isDirectPlayback) {
+        localTickAnchorRef.current = Date.now()
+        return
       }
       if (pendingActive) {
         localTickAnchorRef.current = Date.now()
@@ -674,9 +844,27 @@ export function useStation(code: string, joinPassword?: string | null) {
       clearInterval(timeSync)
       clearInterval(streamInfoRefresh)
       clearInterval(ticker)
+      pendingDirectCommandRef.current = null
       reset()
     }
-  }, [addChatMessage, code, joinPassword, registerTimeSyncSample, reset, setConnected, setConnecting, setMembers, setPlayback, setQueue, setStation, setStationStreamUrl, socket])
+  }, [
+    addChatMessage,
+    beginDirectCommandWait,
+    clearPendingDirectCommand,
+    code,
+    getPendingDirectCommand,
+    joinPassword,
+    registerTimeSyncSample,
+    reset,
+    setConnected,
+    setConnecting,
+    setMembers,
+    setPlayback,
+    setQueue,
+    setStation,
+    setStationStreamUrl,
+    socket,
+  ])
 
   const sendPlaybackControl = useCallback(
     async (action: string, position?: number, value?: string) => {
@@ -714,18 +902,24 @@ export function useStation(code: string, joinPassword?: string | null) {
       // Optimistic UI update — apply state change immediately before server confirms.
       const now = Date.now()
       const s = useStationStore.getState()
-      const directAudio = s.station?.playbackMode === 'DIRECT' ? activeAudioRef.current.audioRef.current : null
+      const isDirectPlayback = s.station?.playbackMode === 'DIRECT'
+      const directAudio = isDirectPlayback ? activeAudioRef.current.audioRef.current : null
       const directAudioPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
-      const directTransitionAction =
-        s.station?.playbackMode === 'DIRECT' && (action === 'skip' || action === 'prev')
-      if (directTransitionAction) {
-        activeAudioRef.current.beginTransition(
-          action === 'prev' ? 'Switching to previous track...' : 'Switching to next track...',
-        )
-      }
+      const strictDirectCommand =
+        isDirectPlayback &&
+        (command.type === PlaybackCommandType.PLAY ||
+          command.type === PlaybackCommandType.PAUSE ||
+          command.type === PlaybackCommandType.SKIP ||
+          command.type === PlaybackCommandType.PREVIOUS)
 
-      if (action === 'play' || action === 'pause') {
+      if (strictDirectCommand) {
+        beginDirectCommandWait(command.type, s.playback.currentTrack?.id ?? null)
+        playPauseIntentRef.current = null
+        if (action !== 'seek') {
+          seekIntentRef.current = null
+        }
+      } else if (action === 'play' || action === 'pause') {
         playPauseIntentRef.current = {
           action,
           trackId: s.playback.currentTrack?.id ?? null,
@@ -734,13 +928,13 @@ export function useStation(code: string, joinPassword?: string | null) {
         seekIntentRef.current = null
       }
 
-      if (action === 'pause') {
+      if (!strictDirectCommand && action === 'pause') {
         const currentPosition =
           directAudioPosition ??
           (s.playback.trackStartedAt ? (now - s.playback.trackStartedAt) / 1000 : s.playback.currentPosition)
         setPlayback({ isPaused: true, isPlaying: false, currentPosition })
         localTickAnchorRef.current = now
-      } else if (action === 'play') {
+      } else if (!strictDirectCommand && action === 'play') {
         const currentPosition = directAudioPosition ?? s.playback.currentPosition
         setPlayback({
           isPaused: false,
@@ -761,9 +955,17 @@ export function useStation(code: string, joinPassword?: string | null) {
         localTickAnchorRef.current = now
       }
 
-      await api.post(`/stations/${stationId}/playback/commands`, command)
+      try {
+        await api.post(`/stations/${stationId}/playback/commands`, command)
+      } catch (error) {
+        if (strictDirectCommand) {
+          clearPendingDirectCommand({ finishTransition: true })
+          void activeAudioRef.current.restartAudio()
+        }
+        throw error
+      }
     },
-    [setPlayback],
+    [beginDirectCommandWait, clearPendingDirectCommand, setPlayback],
   )
 
   const sendChatMessage = useCallback(
