@@ -198,9 +198,16 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   useEffect(() => {
     const currentTrackId = state.currentTrackId
     const isTrackPaused = !!state.isPaused
+    const pendingDirectCommand = pendingDirectCommandRef.current
+    const pendingDirectActive =
+      !!pendingDirectCommand && Date.now() <= pendingDirectCommand.expiresAt
 
     if (!currentTrackId || isTrackPaused) {
       autoRestartTrackIdRef.current = null
+      return
+    }
+
+    if (pendingDirectActive) {
       return
     }
 
@@ -216,7 +223,11 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     const timer = window.setTimeout(() => {
       const latestState = stateRef.current
       const latestTrackId = latestState.currentTrackId
+      const latestPendingCommand = pendingDirectCommandRef.current
+      const latestPendingActive =
+        !!latestPendingCommand && Date.now() <= latestPendingCommand.expiresAt
       if (!latestTrackId || latestTrackId !== currentTrackId || latestState.isPaused) return
+      if (latestPendingActive) return
       if (playbackRef.current.audioConnectionState === 'playing') return
 
       autoRestartTrackIdRef.current = currentTrackId
@@ -374,7 +385,18 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       const nextPlaybackMode = stateRef.current.playbackMode ?? DEFAULT_PLAYBACK_MODE
       const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
       const previousTrackId = stateRef.current.currentTrackId ?? null
+      const nextTrackId = data.track?.id ?? null
       const commandType = typeof data.commandType === 'string' ? data.commandType : null
+      const pendingDirectCommand = getPendingDirectCommand()
+      if (
+        nextIsDirectMode &&
+        previousTrackId &&
+        nextTrackId &&
+        nextTrackId !== previousTrackId &&
+        !pendingDirectCommand
+      ) {
+        playbackRef.current.beginCommandWait('Loading next track...')
+      }
       const targetPosition = getEstimatedServerPosition({
         currentPosition: 0,
         duration: data.track?.duration ?? 0,
@@ -403,8 +425,6 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         trackStartedAt: data.trackStartedAt ?? null,
       }))
 
-      const nextTrackId = data.track?.id ?? null
-      const pendingDirectCommand = getPendingDirectCommand()
       if (nextIsDirectMode && pendingDirectCommand) {
         const resolvedTrackChange =
           (pendingDirectCommand.type === PlaybackCommandType.SKIP ||

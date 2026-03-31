@@ -375,8 +375,19 @@ export function useStation(code: string, joinPassword?: string | null) {
       const stationPlaybackMode = useStationStore.getState().station?.playbackMode
       const previousTrackId = useStationStore.getState().playback.currentTrack?.id ?? null
       const nextTrack = data.track ?? null
+      const nextTrackId = nextTrack?.id ?? null
       const commandType =
         typeof data.commandType === 'string' ? data.commandType : null
+      const pendingDirectCommand = getPendingDirectCommand()
+      if (
+        stationPlaybackMode === 'DIRECT' &&
+        previousTrackId &&
+        nextTrackId &&
+        nextTrackId !== previousTrackId &&
+        !pendingDirectCommand
+      ) {
+        activeAudio.beginCommandWait('Loading next track...')
+      }
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
       const nextPosition = getEstimatedServerPosition({
         currentPosition:
@@ -402,8 +413,6 @@ export function useStation(code: string, joinPassword?: string | null) {
         isPlaying: !!nextTrack && !data.isPaused,
       })
       localTickAnchorRef.current = Date.now()
-      const nextTrackId = nextTrack?.id ?? null
-      const pendingDirectCommand = getPendingDirectCommand()
       if (stationPlaybackMode === 'DIRECT' && pendingDirectCommand) {
         const resolvedTrackChange =
           (pendingDirectCommand.type === PlaybackCommandType.SKIP ||
@@ -644,6 +653,7 @@ export function useStation(code: string, joinPassword?: string | null) {
       setPlayback({
         currentPosition: resolvedPosition,
         isPaused: resolvedIsPaused,
+        isPlaying: !!playbackState.currentTrack && !resolvedIsPaused,
         trackStartedAt: nextTrackStartedAt,
         ...(data.currentQueueType !== undefined && { currentQueueType: data.currentQueueType }),
         ...(data.loopMode !== undefined && { loopMode: normalizeLoopMode(data.loopMode) }),

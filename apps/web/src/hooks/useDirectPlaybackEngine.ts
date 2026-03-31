@@ -12,7 +12,8 @@ const STRICT_ALIGN_THRESHOLD_S = 0.05
 const SOFT_ALIGN_THRESHOLD_S = 0.35
 const RESUME_SYNC_GRACE_MS = 1_100
 const RESUME_SYNC_SOFT_FORWARD_LIMIT_S = 1.15
-const TRACK_START_STABILIZE_MS = 1_400
+const TRACK_START_STABILIZE_MS = 3_200
+const TRACK_OPENING_GRACE_S = 3
 const TRACK_END_SEEK_GUARD_S = 0.4
 const STALL_RECOVERY_DELAY_MS = 2_000
 const STALL_RECOVERY_MAX_RETRIES = 3
@@ -362,11 +363,27 @@ export function useDirectPlaybackEngine({
       const audio = audioRef.current
       if (audio) {
         stopVolumeFade()
-        audio.pause()
+        if (!audio.paused && audio.volume > 0.001) {
+          fadeVolumeTo(0, VOLUME_FADE_OUT_MS, () => {
+            const currentAudio = audioRef.current
+            if (!currentAudio) return
+            currentAudio.pause()
+            currentAudio.volume = targetVolumeRef.current
+          })
+        } else {
+          audio.pause()
+          audio.volume = targetVolumeRef.current
+        }
       }
       setConnectionStatus('connecting', message)
     },
-    [clearResumeSyncGrace, clearStallRecovery, setConnectionStatus, stopVolumeFade],
+    [
+      clearResumeSyncGrace,
+      clearStallRecovery,
+      fadeVolumeTo,
+      setConnectionStatus,
+      stopVolumeFade,
+    ],
   )
 
   const loadTrack = useCallback(
@@ -387,6 +404,9 @@ export function useDirectPlaybackEngine({
           bounded >= Math.max(currentTrackDuration - TRACK_END_SEEK_GUARD_S, 0)
             ? 0
             : bounded
+      }
+      if (sourceChanged && !desired.isPaused && safeTarget <= TRACK_OPENING_GRACE_S) {
+        safeTarget = 0
       }
 
       pendingTargetPositionRef.current = safeTarget
@@ -829,13 +849,20 @@ export function useDirectPlaybackEngine({
     (args: { targetPosition: number; actualPosition: number | null; syncType: string; rttMs: number | null }) => {
       const audio = audioRef.current
       const pauseFadeInFlight = isPaused && !!audio && !audio.paused
+      const withinOpeningGraceWindow =
+        Date.now() - lastTrackLoadAtRef.current < TRACK_START_STABILIZE_MS &&
+        args.targetPosition <= TRACK_OPENING_GRACE_S &&
+        (args.actualPosition ?? 0) <= TRACK_OPENING_GRACE_S &&
+        args.targetPosition >= (args.actualPosition ?? 0)
       if (!pauseFadeInFlight && audio && audio.readyState >= 1 && Number.isFinite(args.targetPosition)) {
         const syncType = args.syncType.toLowerCase()
         const strictSync =
           isPaused ||
           syncType === 'command:pause' ||
           (syncType === 'command:seek' && isPaused)
-        applyTargetPosition(args.targetPosition, strictSync ? 'strict' : 'soft')
+        if (!withinOpeningGraceWindow || strictSync) {
+          applyTargetPosition(args.targetPosition, strictSync ? 'strict' : 'soft')
+        }
       } else if (!pauseFadeInFlight) {
         // Fall back to the engine state if the sync sample does not carry a usable target.
         seekToExpectedPosition()
