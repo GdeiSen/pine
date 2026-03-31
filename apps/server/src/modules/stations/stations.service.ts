@@ -7,7 +7,9 @@ import {
   BadRequestException,
 } from '@nestjs/common'
 import * as bcrypt from 'bcryptjs'
+import * as fs from 'fs'
 import * as path from 'path'
+import { v4 as uuid } from 'uuid'
 import { ConfigService } from '@nestjs/config'
 import { PlaybackLoopMode, TrackAssetKind } from '@prisma/client'
 import { PrismaService } from '../../prisma/prisma.service'
@@ -49,6 +51,7 @@ const FALLBACK_STATION_DESCRIPTION_CLOSERS = [
 @Injectable()
 export class StationsService {
   private static readonly MAX_STATIONS_PER_USER = 5
+  private static readonly MAX_PREVIEW_VIDEOS_PER_STATION = 5
 
   constructor(
     private prisma: PrismaService,
@@ -322,7 +325,7 @@ export class StationsService {
   }
 
   async delete(stationId: string, userId: string) {
-    await this.assertOwner(stationId, userId)
+    const station = await this.assertOwner(stationId, userId)
 
     const tracks = await this.prisma.track.findMany({
       where: { stationId },
@@ -343,6 +346,15 @@ export class StationsService {
     })
 
     await Promise.all(tracks.map((track) => this.deleteTrackObjects(track)))
+    await Promise.all(
+      (station.previewVideoKeys ?? []).map((key) =>
+        this.storageService.deleteObject('transcodes', key).catch(() => undefined),
+      ),
+    )
+    const stationCoverKey = this.getStationCoverObjectKey(station.coverImage)
+    if (stationCoverKey) {
+      await this.storageService.deleteObject('covers', stationCoverKey).catch(() => undefined)
+    }
 
     const trackIds = tracks.map((t) => t.id)
     await this.prisma.$transaction(async (tx) => {
@@ -353,6 +365,247 @@ export class StationsService {
       await tx.track.deleteMany({ where: { stationId } })
       await tx.station.delete({ where: { id: stationId } })
     })
+  }
+
+  async uploadPreviewVideo(stationId: string, userId: string, file: Express.Multer.File) {
+    const station = await this.assertOwner(stationId, userId)
+    const existingPreviewKeys = station.previewVideoKeys ?? []
+
+    if (!String(file.mimetype ?? '').toLowerCase().startsWith('video/')) {
+      this.safeDeleteTempFile(file.path)
+      throw new BadRequestException('Unsupported video format')
+    }
+
+    if (existingPreviewKeys.length >= StationsService.MAX_PREVIEW_VIDEOS_PER_STATION) {
+      this.safeDeleteTempFile(file.path)
+      throw new BadRequestException(
+        `Maximum ${StationsService.MAX_PREVIEW_VIDEOS_PER_STATION} preview videos per station`,
+      )
+    }
+
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.mp4'
+    const objectKey = this.storageService.buildObjectKey({
+      stationId,
+      scope: 'transcodes',
+      fileName: `preview-${uuid()}${ext}`,
+    })
+
+    try {
+      await this.storageService.uploadFile('transcodes', objectKey, file.path, file.mimetype)
+
+      const updated = await this.prisma.station.update({
+        where: { id: stationId },
+        data: {
+          previewVideoKeys: [...existingPreviewKeys, objectKey],
+        },
+        select: { id: true, previewVideoKeys: true },
+      })
+
+      return {
+        previewVideos: this.buildPreviewVideoUrls(updated.id, updated.previewVideoKeys),
+      }
+    } catch (error) {
+      await this.storageService.deleteObject('transcodes', objectKey).catch(() => undefined)
+      throw error
+    } finally {
+      this.safeDeleteTempFile(file.path)
+    }
+  }
+
+  async uploadStationCover(stationId: string, userId: string, file: Express.Multer.File) {
+    const station = await this.assertOwner(stationId, userId)
+
+    if (!String(file.mimetype ?? '').toLowerCase().startsWith('image/')) {
+      this.safeDeleteTempFile(file.path)
+      throw new BadRequestException('Unsupported image format')
+    }
+
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg'
+    const objectKey = this.storageService.buildObjectKey({
+      stationId,
+      scope: 'covers',
+      fileName: `station-cover-${uuid()}${ext}`,
+    })
+    const previousCoverKey = this.getStationCoverObjectKey(station.coverImage)
+
+    try {
+      await this.storageService.uploadFile('covers', objectKey, file.path, file.mimetype)
+
+      const updated = await this.prisma.station.update({
+        where: { id: stationId },
+        data: { coverImage: objectKey },
+        select: { id: true, coverImage: true },
+      })
+
+      if (previousCoverKey && previousCoverKey !== objectKey) {
+        await this.storageService.deleteObject('covers', previousCoverKey).catch(() => undefined)
+      }
+
+      return {
+        coverImage: this.buildStationCoverUrl(updated.id, updated.coverImage),
+      }
+    } catch (error) {
+      await this.storageService.deleteObject('covers', objectKey).catch(() => undefined)
+      throw error
+    } finally {
+      this.safeDeleteTempFile(file.path)
+    }
+  }
+
+  async deleteStationCover(stationId: string, userId: string) {
+    const station = await this.assertOwner(stationId, userId)
+    const previousCoverKey = this.getStationCoverObjectKey(station.coverImage)
+
+    await this.prisma.station.update({
+      where: { id: stationId },
+      data: { coverImage: null },
+      select: { id: true },
+    })
+
+    if (previousCoverKey) {
+      await this.storageService.deleteObject('covers', previousCoverKey).catch(() => undefined)
+    }
+
+    return { coverImage: null }
+  }
+
+  async deletePreviewVideo(stationId: string, index: number, userId: string) {
+    if (!Number.isInteger(index) || index < 0) {
+      throw new BadRequestException('Invalid preview video index')
+    }
+
+    const station = await this.assertOwner(stationId, userId)
+    const keys = station.previewVideoKeys ?? []
+    const key = keys[index]
+    if (!key) throw new NotFoundException('Preview video not found')
+
+    const nextKeys = keys.filter((_, idx) => idx !== index)
+    const updated = await this.prisma.station.update({
+      where: { id: stationId },
+      data: { previewVideoKeys: nextKeys },
+      select: { id: true, previewVideoKeys: true },
+    })
+
+    await this.storageService.deleteObject('transcodes', key).catch(() => undefined)
+
+    return {
+      previewVideos: this.buildPreviewVideoUrls(updated.id, updated.previewVideoKeys),
+    }
+  }
+
+  async streamPreviewVideo(
+    stationId: string,
+    index: number,
+    res: any,
+    rangeHeader: string | undefined,
+    userId?: string,
+  ) {
+    if (!Number.isInteger(index) || index < 0) {
+      throw new BadRequestException('Invalid preview video index')
+    }
+
+    const station = await this.prisma.station.findUnique({
+      where: { id: stationId },
+      select: {
+        id: true,
+        ownerId: true,
+        accessMode: true,
+        previewVideoKeys: true,
+      },
+    })
+    if (!station) throw new NotFoundException('Station not found')
+    await this.assertStationReadable(station, userId)
+
+    const objectKey = station.previewVideoKeys?.[index]
+    if (!objectKey) throw new NotFoundException('Preview video not found')
+
+    const mimeType = this.getMimeTypeByExt(objectKey, 'video/mp4')
+    const stat = await this.storageService.getObjectStat('transcodes', objectKey).catch(() => null)
+    const totalSize = stat?.size ?? 0
+
+    if (rangeHeader && totalSize > 0) {
+      const match = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
+      if (match) {
+        const start = match[1] ? parseInt(match[1], 10) : 0
+        const end = match[2] ? parseInt(match[2], 10) : totalSize - 1
+        const chunkSize = end - start + 1
+
+        res.set({
+          'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': mimeType,
+          'Cache-Control': 'no-store',
+        })
+        res.status(206)
+
+        try {
+          const stream = await this.storageService.getPartialObjectStream('transcodes', objectKey, start, chunkSize)
+          stream.on('error', () => {
+            if (!res.headersSent) res.status(500).end()
+            else res.end()
+          })
+          stream.pipe(res)
+        } catch {
+          throw new NotFoundException('Preview video file not found')
+        }
+        return
+      }
+    }
+
+    res.set({
+      'Content-Type': mimeType,
+      'Accept-Ranges': 'bytes',
+      ...(totalSize > 0 ? { 'Content-Length': totalSize } : {}),
+      'Cache-Control': 'no-store',
+    })
+    res.status(200)
+
+    try {
+      const stream = await this.storageService.getObjectStream('transcodes', objectKey)
+      stream.on('error', () => {
+        if (!res.headersSent) res.status(500).end()
+        else res.end()
+      })
+      stream.pipe(res)
+    } catch {
+      throw new NotFoundException('Preview video file not found')
+    }
+  }
+
+  async streamStationCover(stationId: string, res: any, userId?: string) {
+    const station = await this.prisma.station.findUnique({
+      where: { id: stationId },
+      select: {
+        id: true,
+        ownerId: true,
+        accessMode: true,
+        coverImage: true,
+      },
+    })
+    if (!station) throw new NotFoundException('Station not found')
+    await this.assertStationReadable(station, userId)
+
+    const objectKey = this.getStationCoverObjectKey(station.coverImage)
+    if (!objectKey) throw new NotFoundException('Station cover not found')
+
+    const mimeType = this.getMimeTypeByExt(objectKey, 'image/jpeg')
+    res.set({
+      'Content-Type': mimeType,
+      'Cache-Control': 'no-store',
+    })
+    res.status(200)
+
+    try {
+      const stream = await this.storageService.getObjectStream('covers', objectKey)
+      stream.on('error', () => {
+        if (!res.headersSent) res.status(500).end()
+        else res.end()
+      })
+      stream.pipe(res)
+    } catch {
+      throw new NotFoundException('Station cover file not found')
+    }
   }
 
   async setLive(stationId: string, isLive: boolean) {
@@ -428,6 +681,48 @@ export class StationsService {
     return station
   }
 
+  private async assertStationReadable(
+    station: { id: string; ownerId: string; accessMode: string },
+    userId?: string,
+  ) {
+    const accessMode = this.normalizeAccessMode(station.accessMode)
+    if (accessMode === StationAccessMode.PUBLIC) return
+
+    if (!userId) {
+      throw new ForbiddenException('Authentication required for non-public station')
+    }
+    if (station.ownerId === userId) return
+
+    const member = await this.prisma.stationMember.findUnique({
+      where: { stationId_userId: { stationId: station.id, userId } },
+      select: { id: true },
+    })
+    if (!member) throw new ForbiddenException('Access denied')
+  }
+
+  private buildPreviewVideoUrls(stationId: string, keys?: string[] | null) {
+    if (!Array.isArray(keys) || keys.length === 0) return []
+    return keys.map((_key, index) => `/api/stations/${stationId}/preview-videos/${index}/stream`)
+  }
+
+  private getStationCoverObjectKey(rawCoverImage: string | null | undefined) {
+    if (typeof rawCoverImage !== 'string') return null
+    const value = rawCoverImage.trim()
+    if (!value) return null
+    return value.startsWith('stations/') ? value : null
+  }
+
+  private buildStationCoverUrl(stationId: string, rawCoverImage: string | null | undefined) {
+    const objectKey = this.getStationCoverObjectKey(rawCoverImage)
+    if (objectKey) return `/api/stations/${stationId}/cover/stream`
+
+    if (typeof rawCoverImage === 'string' && rawCoverImage.trim().length > 0) {
+      return rawCoverImage
+    }
+
+    return null
+  }
+
   private formatStation(
     station: any,
     listenerCount: number,
@@ -455,7 +750,8 @@ export class StationsService {
       code: station.code,
       name: station.name,
       description: station.description,
-      coverImage: station.coverImage,
+      coverImage: this.buildStationCoverUrl(station.id, station.coverImage),
+      previewVideos: this.buildPreviewVideoUrls(station.id, station.previewVideoKeys),
       ownerId: station.ownerId,
       owner: station.owner,
       accessMode,
@@ -688,6 +984,29 @@ export class StationsService {
     } catch {
       return clientUrl.replace(/\/+$/, '')
     }
+  }
+
+  private safeDeleteTempFile(filePath: string | undefined) {
+    if (!filePath) return
+    try {
+      fs.unlinkSync(filePath)
+    } catch {
+      // no-op
+    }
+  }
+
+  private getMimeTypeByExt(filePath: string, fallback: string) {
+    const ext = path.extname(filePath).toLowerCase()
+    if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+    if (ext === '.png') return 'image/png'
+    if (ext === '.webp') return 'image/webp'
+    if (ext === '.gif') return 'image/gif'
+    if (ext === '.avif') return 'image/avif'
+    if (ext === '.mp4') return 'video/mp4'
+    if (ext === '.webm') return 'video/webm'
+    if (ext === '.mov') return 'video/quicktime'
+    if (ext === '.m4v') return 'video/x-m4v'
+    return fallback
   }
 
   private estimateLatencyHintMs(quality: string) {

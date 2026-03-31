@@ -11,6 +11,7 @@ interface LeftPanelProps {
   stationCode?: string
   stationName?: string
   stationDescription?: string | null
+  stationCoverImage?: string | null
   stationPlaybackSeconds?: number | null
   messages: ChatMessage[]
   onSendMessage: (content: string) => void
@@ -35,6 +36,7 @@ export function LeftPanel({
   stationCode = '000000',
   stationName,
   stationDescription,
+  stationCoverImage,
   stationPlaybackSeconds = 0,
   messages,
   onSendMessage,
@@ -63,6 +65,12 @@ export function LeftPanel({
       .slice(-4)
   }, [messages, now])
 
+  const stationCoverUrl = useMemo(() => {
+    if (typeof stationCoverImage !== 'string') return null
+    const normalized = stationCoverImage.trim()
+    return normalized.length > 0 ? normalized : null
+  }, [stationCoverImage])
+
   const currentTimeLabel = useMemo(
     () =>
       new Date(now).toLocaleTimeString([], {
@@ -90,10 +98,28 @@ export function LeftPanel({
       className="relative w-full h-full flex flex-col overflow-hidden"
       style={{ background: 'var(--bg-panel)' }}
     >
-      {/* Numbers — flush to top */}
-      <div className="flex flex-col pt-10 w-full px-4">
-        {/* Top row */}
-        <div className="w-full flex justify-center">
+      {stationCoverUrl ? (
+        <div>
+          <div className="relative overflow-hidden aspect-[4/5]">
+            <img src={stationCoverUrl} alt="Station cover" className="w-full h-full object-cover" />
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-col pt-10 w-full px-4">
+          <div className="w-full flex justify-center">
+            <motion.p
+              className="font-black tabular-nums leading-none text-center w-full"
+              style={{
+                fontSize: 'clamp(80px, 15vw, 116px)',
+                letterSpacing: '0.04em',
+                color: '#ffffff',
+              }}
+              animate={{ opacity: isActive ? 1 : 0.6 }}
+              transition={{ duration: 0.8 }}
+            >
+              {top}
+            </motion.p>
+          </div>
           <motion.p
             className="font-black tabular-nums leading-none text-center w-full"
             style={{
@@ -104,22 +130,10 @@ export function LeftPanel({
             animate={{ opacity: isActive ? 1 : 0.6 }}
             transition={{ duration: 0.8 }}
           >
-            {top}
+            {bottom}
           </motion.p>
         </div>
-        <motion.p
-          className="font-black tabular-nums leading-none text-center w-full"
-          style={{
-            fontSize: 'clamp(80px, 15vw, 116px)',
-            letterSpacing: '0.04em',
-            color: '#ffffff',
-          }}
-          animate={{ opacity: isActive ? 1 : 0.6 }}
-          transition={{ duration: 0.8 }}
-        >
-          {bottom}
-        </motion.p>
-      </div>
+      )}
 
       {/* Station name + description */}
       {stationName && (

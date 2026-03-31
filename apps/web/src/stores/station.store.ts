@@ -41,6 +41,7 @@ interface StationInfo {
   name: string
   description: string | null
   coverImage: string | null
+  previewVideos: string[]
   owner: { id: string; username: string; avatar: string | null }
   isLive: boolean
   accessMode: string

@@ -6,8 +6,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth.store";
 import { Button } from "@/components/ui/button";
+import { UserSettingsPanel } from "@/components/station/user-settings-panel";
 import api from "@/lib/api";
-import { Radio, LogOut, Search, Plus, X, TreePine } from "lucide-react";
+import { Radio, LogOut, Search, Plus, X, TreePine, UserCog, Moon, Sun } from "lucide-react";
+import { useTheme } from "next-themes";
 
 interface StationListItem {
   id: string;
@@ -24,6 +26,8 @@ interface DiveTransitionState {
   originX: number;
   originY: number;
 }
+
+type DashboardMode = "map" | "user-settings";
 
 function hashString(value: string): number {
   let h = 2166136261;
@@ -47,7 +51,6 @@ function createRng(seed: number): () => number {
 const MAX_MAP_STATIONS = 10;
 const MAX_OWN_STATIONS = 5;
 const ACTIVE_MARKER_COLOR = "#E8440F";
-const INACTIVE_MARKER_COLOR = "#FFFFFF";
 const STATION_DIVE_NAV_DELAY_MS = 780;
 const STATION_DIVE_FAILSAFE_MS = 4000;
 
@@ -55,7 +58,10 @@ export default function DashboardPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { user, logout } = useAuthStore();
+  const { theme, resolvedTheme, setTheme } = useTheme();
   const [publicSeed] = useState(() => Math.floor(Math.random() * 1_000_000_000));
+  const [mounted, setMounted] = useState(false);
+  const [dashboardMode, setDashboardMode] = useState<DashboardMode>("map");
   const [search, setSearch] = useState("");
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [newStationName, setNewStationName] = useState("");
@@ -67,12 +73,7 @@ export default function DashboardPage() {
   const [mapArea, setMapArea] = useState({ width: 1280, height: 640 });
 
   useEffect(() => {
-    const root = document.documentElement;
-    const hadDark = root.classList.contains("dark");
-    root.classList.add("dark");
-    return () => {
-      if (!hadDark) root.classList.remove("dark");
-    };
+    setMounted(true);
   }, []);
 
   useEffect(() => {
@@ -266,6 +267,7 @@ export default function DashboardPage() {
   );
 
   const isLoading = loadingMy || loadingDiscover;
+  const isDarkTheme = (resolvedTheme ?? theme ?? "dark") === "dark";
   const trimmedStationName = newStationName.trim();
   const trimmedStationDescription = newStationDescription.trim();
   const canCreateStation =
@@ -391,12 +393,48 @@ export default function DashboardPage() {
           <span className="text-xs text-[--text-muted] mr-2">
             {user?.username}
           </span>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() =>
+              setTheme(isDarkTheme ? "light" : "dark")
+            }
+            aria-label={isDarkTheme ? "Switch to light theme" : "Switch to dark theme"}
+            title={isDarkTheme ? "Switch to light theme" : "Switch to dark theme"}
+          >
+            {mounted && (isDarkTheme ? <Sun size={14} /> : <Moon size={14} />)}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => {
+              for (const timeoutId of diveTimeoutsRef.current) {
+                window.clearTimeout(timeoutId);
+              }
+              diveTimeoutsRef.current = [];
+              setDiveTransition(null);
+              setIsCreateModalOpen(false);
+              setCreateError("");
+              setDashboardMode((v) => (v === "user-settings" ? "map" : "user-settings"));
+            }}
+            aria-label="User settings"
+            title="User settings"
+          >
+            <UserCog size={14} />
+          </Button>
           <Button variant="ghost" size="icon-sm" onClick={handleLogout}>
             <LogOut size={14} />
           </Button>
         </div>
       </header>
 
+      {dashboardMode === "user-settings" ? (
+        <main className="flex-1 min-h-0 relative overflow-hidden flex flex-col">
+          <div className="flex-1 min-h-0">
+            <UserSettingsPanel onBack={() => setDashboardMode("map")} />
+          </div>
+        </main>
+      ) : (
       <main className="flex-1 min-h-0 relative overflow-hidden flex flex-col">
         <div className="absolute inset-0" aria-hidden style={{ background: "var(--bg)" }} />
         <div
@@ -498,7 +536,9 @@ export default function DashboardPage() {
                           !!station.currentTrackId;
                         const dotColor = isActive
                           ? ACTIVE_MARKER_COLOR
-                          : INACTIVE_MARKER_COLOR;
+                          : isDarkTheme
+                            ? "#FFFFFF"
+                            : "var(--text-primary)";
                         const dotShadow = isActive
                           ? "0 0 10px rgba(232,68,15,0.7)"
                           : "0 0 0 rgba(0,0,0,0)";
@@ -564,9 +604,10 @@ export default function DashboardPage() {
           </div>
         </div>
       </main>
+      )}
 
       <AnimatePresence>
-        {diveTransition && (
+        {dashboardMode === "map" && diveTransition && (
           <motion.div
             className="fixed inset-0 z-[85] pointer-events-none overflow-hidden"
             initial={{ opacity: 0 }}
@@ -602,7 +643,7 @@ export default function DashboardPage() {
       </AnimatePresence>
 
       <AnimatePresence>
-        {isCreateModalOpen && (
+        {dashboardMode === "map" && isCreateModalOpen && (
           <div className="fixed inset-0 z-[90] flex items-center justify-center p-4">
             <motion.button
               type="button"

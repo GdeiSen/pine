@@ -304,7 +304,13 @@ export class StationGateway
         code: station.code,
         name: station.name,
         description: station.description,
-        coverImage: station.coverImage,
+        coverImage:
+          typeof station.coverImage === 'string' && station.coverImage.startsWith('stations/')
+            ? `/api/stations/${station.id}/cover/stream`
+            : station.coverImage,
+        previewVideos: (station.previewVideoKeys ?? []).map(
+          (_key, index) => `/api/stations/${station.id}/preview-videos/${index}/stream`,
+        ),
         owner: station.owner,
         isLive: station.isLive,
         accessMode: station.accessMode,

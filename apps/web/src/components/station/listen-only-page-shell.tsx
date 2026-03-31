@@ -13,6 +13,7 @@ interface ListenOnlyPageShellProps {
   stationCode: string
   stationName?: string
   stationDescription?: string | null
+  stationCoverImage?: string | null
   stationPlaybackSeconds?: number | null
   isPlaying: boolean
   isPaused: boolean
@@ -31,6 +32,7 @@ export function ListenOnlyPageShell({
   stationCode,
   stationName,
   stationDescription,
+  stationCoverImage,
   stationPlaybackSeconds = 0,
   isPlaying,
   isPaused,
@@ -97,6 +99,7 @@ export function ListenOnlyPageShell({
               stationCode={stationCode}
               stationName={stationName}
               stationDescription={stationDescription}
+              stationCoverImage={stationCoverImage}
               stationPlaybackSeconds={stationPlaybackSeconds}
               messages={messages}
               onSendMessage={onSendMessage}

@@ -186,15 +186,15 @@ export function TrackInfo({
     audioConnectionState === "reconnecting";
   const slowLoadingDescription = (() => {
     if (audioConnectionState === "connecting") {
-      return "Подключаемся к источнику и запрашиваем новый аудиопоток.";
+      return "Connecting to the source and requesting a fresh audio stream.";
     }
     if (audioConnectionState === "buffering") {
-      return "Буферизуем аудио, чтобы продолжить воспроизведение без рывков.";
+      return "Buffering audio to keep playback smooth.";
     }
     if (audioConnectionState === "reconnecting") {
-      return "Восстанавливаем соединение со стримом.";
+      return "Restoring the stream connection.";
     }
-    return "Проверяем состояние плеера и готовим воспроизведение.";
+    return "Checking player state and preparing playback.";
   })();
   const trackExtension = (() => {
     const name = track?.filename?.trim();
@@ -380,7 +380,7 @@ export function TrackInfo({
                       transition={SOFT_FADE_FAST_TRANSITION}
                     >
                       <p className="text-xs font-medium text-[--text-primary]">
-                        Загрузка занимает больше времени, чем мы ожидали
+                        Loading is taking longer than expected
                       </p>
                       <p className="text-[11px] text-[--text-muted] mt-1">
                         {slowLoadingDescription}
@@ -418,8 +418,8 @@ export function TrackInfo({
                   <RotateCw size={20} />
                 </button>
                 <p className="text-xs text-[--text-muted] text-center">
-                  Звук был заблокирован браузером. Нажмите кнопку, чтобы
-                  перезапустить воспроизведение.
+                  Audio playback was blocked by the browser. Tap the button to
+                  restart playback.
                 </p>
               </>
             )}

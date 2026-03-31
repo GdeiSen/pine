@@ -162,6 +162,7 @@ export interface Station {
   name: string
   description: string | null
   coverImage: string | null
+  previewVideos: string[]
   ownerId: string
   owner: Pick<User, 'id' | 'username' | 'avatar'>
   accessMode: StationAccessMode

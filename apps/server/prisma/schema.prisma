@@ -199,6 +199,7 @@ model Station {
   name              String
   description       String?
   coverImage        String?
+  previewVideoKeys  String[]          @default([])
   ownerId           String
   owner             User              @relation("StationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   accessMode        StationAccessMode @default(PRIVATE)

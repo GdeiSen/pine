@@ -1072,7 +1072,7 @@ export function AddTracksPanel({
 
   const handleDeleteFolder = () => {
     if (!selectedPlaylist || selectedPlaylist.isDefault) return;
-    const ok = window.confirm(`Удалить папку "${selectedPlaylist.name}"?`);
+    const ok = window.confirm(`Delete folder "${selectedPlaylist.name}"?`);
     if (!ok) return;
 
     const fallback =

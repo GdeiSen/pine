@@ -14,8 +14,6 @@ import { ArrowLeft, Lock, Hash, Globe2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
 import api from "@/lib/api";
-import { useAuthStore } from "@/stores/auth.store";
-import { formatFileSize, getAvatarFallback } from "@/lib/utils";
 
 type AccessMode = "PUBLIC" | "PRIVATE";
 type StreamQuality = "LOW" | "MEDIUM" | "HIGH";
@@ -26,6 +24,7 @@ interface StationSettingsInfo {
   code: string;
   name: string;
   description: string | null;
+  coverImage?: string | null;
   accessMode: string;
   isPasswordProtected: boolean;
   crossfadeDuration: number;
@@ -37,38 +36,6 @@ interface SettingsPanelProps {
   station: StationSettingsInfo;
   onBack: () => void;
   onSaved: (patch: Partial<StationSettingsInfo>) => void;
-}
-
-async function toAvatarDataUrl(file: File): Promise<string> {
-  const readAsDataUrl = () =>
-    new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result ?? ""));
-      reader.onerror = reject;
-      reader.readAsDataURL(file);
-    });
-
-  const src = await readAsDataUrl();
-  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = src;
-  });
-
-  const maxSide = 360;
-  const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
-  const width = Math.max(1, Math.round(image.width * scale));
-  const height = Math.max(1, Math.round(image.height * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return src;
-
-  ctx.drawImage(image, 0, 0, width, height);
-  return canvas.toDataURL("image/jpeg", 0.86);
 }
 
 const ACCESS_OPTIONS: Array<{
@@ -172,14 +139,13 @@ export function SettingsPanel({
   onSaved,
 }: SettingsPanelProps) {
   const router = useRouter();
-  const user = useAuthStore((s) => s.user);
-  const refreshUser = useAuthStore((s) => s.refreshUser);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const stationCoverInputRef = useRef<HTMLInputElement | null>(null);
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   const [name, setName] = useState(station.name);
   const [description, setDescription] = useState(station.description ?? "");
-  const [nickname, setNickname] = useState(user?.username ?? "");
-  const [avatar, setAvatar] = useState<string | null>(user?.avatar ?? null);
+  const [coverImage, setCoverImage] = useState<string | null>(
+    station.coverImage ?? null,
+  );
   const [accessMode, setAccessMode] = useState<AccessMode>(
     (station.accessMode as AccessMode) ?? "PRIVATE",
   );
@@ -194,21 +160,17 @@ export function SettingsPanel({
   );
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
+  const [coverImageUploading, setCoverImageUploading] = useState(false);
+  const [coverImageDeleting, setCoverImageDeleting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [error, setError] = useState("");
   const isDirectOnlyDeployment = DEPLOYMENT_MODE === "direct";
 
-  const availableStorageLabel = user?.storage
-    ? `${formatFileSize(user.storage.availableBytes)} free`
-    : "—";
-  const usedStorageLabel = user?.storage
-    ? `${formatFileSize(user.storage.usedBytes)} used`
-    : "";
-
   useEffect(() => {
     setName(station.name);
     setDescription(station.description ?? "");
+    setCoverImage(station.coverImage ?? null);
     setAccessMode((station.accessMode as AccessMode) ?? "PRIVATE");
     setPasswordEnabled(!!station.isPasswordProtected);
     setStreamQuality((station.streamQuality as StreamQuality) ?? "HIGH");
@@ -216,15 +178,6 @@ export function SettingsPanel({
     setPassword("");
     setError("");
   }, [station]);
-
-  useEffect(() => {
-    setNickname(user?.username ?? "");
-    setAvatar(user?.avatar ?? null);
-  }, [user?.username, user?.avatar]);
-
-  useEffect(() => {
-    refreshUser().catch(() => {});
-  }, [refreshUser]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -282,15 +235,12 @@ export function SettingsPanel({
             ? { password: password.trim() }
             : {}),
         }),
-        api.put("/auth/me", {
-          username: nickname.trim() || null,
-          avatar,
-        }),
       ]);
 
       onSaved({
         name: name.trim(),
         description: description.trim() || null,
+        coverImage,
         accessMode,
         crossfadeDuration: 3,
         streamQuality,
@@ -300,28 +250,11 @@ export function SettingsPanel({
           : false,
       });
       setPassword("");
-      await refreshUser().catch(() => {});
       onBack();
     } catch (err: any) {
       setError(err?.response?.data?.message ?? "Failed to save settings");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleAvatarChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setError("Please choose an image file");
-      return;
-    }
-    try {
-      const next = await toAvatarDataUrl(file);
-      setAvatar(next);
-    } catch {
-      setError("Failed to load avatar");
     }
   };
 
@@ -339,6 +272,54 @@ export function SettingsPanel({
       return false;
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleStationCoverUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (!station.id) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please choose an image file");
+      return;
+    }
+
+    setError("");
+    setCoverImageUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await api.post(`/stations/${station.id}/cover/upload`, formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      const nextCover =
+        typeof response?.data?.coverImage === "string" ? response.data.coverImage : null;
+      setCoverImage(nextCover);
+      onSaved({ coverImage: nextCover });
+    } catch (err: any) {
+      const message = err?.response?.data?.message;
+      if (Array.isArray(message)) setError(message.join(", "));
+      else setError(message ?? "Failed to upload station cover");
+    } finally {
+      setCoverImageUploading(false);
+    }
+  };
+
+  const handleDeleteStationCover = async () => {
+    if (!station.id || !coverImage) return;
+    setError("");
+    setCoverImageDeleting(true);
+    try {
+      await api.delete(`/stations/${station.id}/cover`);
+      setCoverImage(null);
+      onSaved({ coverImage: null });
+    } catch (err: any) {
+      const message = err?.response?.data?.message;
+      if (Array.isArray(message)) setError(message.join(", "));
+      else setError(message ?? "Failed to delete station cover");
+    } finally {
+      setCoverImageDeleting(false);
     }
   };
 
@@ -368,74 +349,12 @@ export function SettingsPanel({
             </Button>
           </div>
           <input
-            ref={fileInputRef}
+            ref={stationCoverInputRef}
             type="file"
             accept="image/*"
             className="hidden"
-            onChange={handleAvatarChange}
+            onChange={handleStationCoverUpload}
           />
-          <div className="flex items-end gap-4 mb-6">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="relative w-20 h-20 rounded-full overflow-hidden shrink-0"
-              title="Change avatar"
-              style={{
-                background: isDarkTheme
-                  ? "rgba(255,255,255,0.06)"
-                  : "rgba(0,0,0,0.08)",
-                border: "1px solid var(--border)",
-              }}
-            >
-              {avatar ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={avatar}
-                  alt="User avatar"
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center text-2xl font-black text-[--text-primary]">
-                  {getAvatarFallback(
-                    (nickname || user?.username || "PI").slice(0, 2),
-                  )}
-                </div>
-              )}
-            </button>
-
-            <div className="min-w-0 flex-1 flex items-end justify-between gap-4">
-              <div className="min-w-0 flex-1">
-                <input
-                  value={nickname}
-                  onChange={(e) => setNickname(e.target.value)}
-                  maxLength={30}
-                  placeholder="Nickname (auto-generated if empty)"
-                  className="w-full text-2xl text-[--text-primary] placeholder:text-[--text-muted] leading-tight focus:outline-none"
-                  style={{
-                    background: "transparent",
-                    border: "none",
-                    outline: "none",
-                  }}
-                />
-                <p className="mt-1 text-sm text-[--text-muted] truncate">
-                  {user?.email ?? "Radio listener profile"}
-                </p>
-              </div>
-              <div className="shrink-0 text-right pb-0.5">
-                <p className="text-[10px] uppercase tracking-[0.08em] text-[--text-muted]">
-                  Storage
-                </p>
-                <p className="text-sm font-semibold text-[--text-primary] whitespace-nowrap">
-                  {availableStorageLabel}
-                </p>
-                {usedStorageLabel ? (
-                  <p className="text-[11px] text-[--text-muted] whitespace-nowrap">
-                    {usedStorageLabel}
-                  </p>
-                ) : null}
-              </div>
-            </div>
-          </div>
           <div className="space-y-3">
             <textarea
               value={name}
@@ -690,6 +609,67 @@ export function SettingsPanel({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.12 }}
+          >
+            <div className="flex items-center gap-2 mb-6">
+              <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
+                Media
+              </p>
+            </div>
+            <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
+              Upload station cover shown in the left panel.
+            </p>
+
+            <div className="space-y-5">
+              <div>
+                <div className="flex items-center justify-end gap-3 mb-2">
+                  <div className="flex items-center gap-2">
+                    {coverImage ? (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={handleDeleteStationCover}
+                        isLoading={coverImageDeleting}
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        stationCoverInputRef.current?.click();
+                      }}
+                      isLoading={coverImageUploading}
+                    >
+                      {coverImage ? "Replace image" : "Upload image"}
+                    </Button>
+                  </div>
+                </div>
+                {coverImage ? (
+                  <div className="relative w-32 md:w-36 aspect-square rounded-xl overflow-hidden border border-[--border] bg-[--bg-subtle]">
+                    <img
+                      src={coverImage}
+                      alt="Station cover"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                ) : (
+                  <p className="text-xs text-[--text-muted]">
+                    Add one station cover image to show in the left panel.
+                  </p>
+                )}
+              </div>
+            </div>
+          </motion.section>
+
+          <motion.section
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15 }}
             className="rounded-2xl"
           >
             <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none mb-4">

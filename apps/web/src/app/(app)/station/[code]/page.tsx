@@ -9,6 +9,7 @@ import { LeftPanel } from "@/components/station/left-panel";
 import { TrackInfo } from "@/components/station/track-info";
 import { QueueLibraryPanel } from "@/components/station/queue-library-panel";
 import { SettingsPanel } from "@/components/station/settings-panel";
+import { UserSettingsPanel } from "@/components/station/user-settings-panel";
 import { AddTracksPanel } from "@/components/station/add-tracks-panel";
 import { ListenOnlyPageShell } from "@/components/station/listen-only-page-shell";
 import { PublicListenPlayer } from "@/components/station/public-listen-player";
@@ -37,11 +38,13 @@ import type { LoopMode } from "@/stores/station.store";
 import { MemberRole, Permission, type StationMember } from "@web-radio/shared";
 
 type Tab = "queue" | "members";
-type ContentMode = "station" | "settings" | "add-tracks";
+type ContentMode = "station" | "settings" | "user-settings" | "add-tracks";
 type PublicGuestStation = {
   code: string;
   name: string;
   description: string | null;
+  coverImage?: string | null;
+  previewVideos?: string[];
   listenerCount: number;
   accessMode: "PUBLIC" | "PRIVATE";
   isPasswordProtected: boolean;
@@ -88,20 +91,20 @@ function formatApiError(err: any, fallback: string) {
 
 function getStationJoinError(err: any) {
   const status = err?.response?.status;
-  const raw = formatApiError(err, "Не удалось подключиться к станции");
+  const raw = formatApiError(err, "Failed to connect to station");
   const text = raw.toLowerCase();
 
   if (status === 404) {
-    return { message: "Станция не найдена", requiresPassword: false };
+    return { message: "Station not found", requiresPassword: false };
   }
   if (status === 403) {
-    return { message: "Нет доступа к станции", requiresPassword: false };
+    return { message: "No access to station", requiresPassword: false };
   }
   if (status === 401 && text.includes("password required")) {
-    return { message: "Введите пароль станции", requiresPassword: true };
+    return { message: "Enter station password", requiresPassword: true };
   }
   if (status === 401 && text.includes("wrong password")) {
-    return { message: "Неверный пароль станции", requiresPassword: true };
+    return { message: "Wrong station password", requiresPassword: true };
   }
 
   return {
@@ -242,7 +245,7 @@ export default function StationPage({
             cache: "no-store",
           });
           if (!res.ok) {
-            if (!cancelled) setJoinError("Станция не найдена");
+            if (!cancelled) setJoinError("Station not found");
             return;
           }
 
@@ -259,15 +262,15 @@ export default function StationPage({
 
           if (stationData.isPasswordProtected) {
             setJoinError(
-              "Для прослушивания этой станции требуется авторизация",
+              "Authentication is required to listen to this station",
             );
             return;
           }
 
-          setJoinError("Нет доступа к станции");
+          setJoinError("No access to station");
           return;
         } catch {
-          if (!cancelled) setJoinError("Не удалось подключиться к станции");
+          if (!cancelled) setJoinError("Failed to connect to station");
           return;
         } finally {
           if (!cancelled) setIsJoinChecking(false);
@@ -526,7 +529,7 @@ export default function StationPage({
     setJoinError("");
     const normalizedPassword = stationPassword.trim();
     if (!normalizedPassword) {
-      setJoinError("Введите пароль станции");
+      setJoinError("Enter station password");
       return;
     }
     setIsSubmittingPassword(true);
@@ -563,7 +566,7 @@ export default function StationPage({
       const isAlreadyAdmin = targetMember?.role === MemberRole.ADMIN;
       if (!isAlreadyAdmin && adminsCount >= MAX_ADMINS_PER_STATION) {
         setMemberActionError(
-          `Максимум ${MAX_ADMINS_PER_STATION} администраторов в станции`,
+          `Maximum ${MAX_ADMINS_PER_STATION} admins allowed per station`,
         );
         return;
       }
@@ -793,9 +796,10 @@ export default function StationPage({
       <ListenOnlyPageShell
         homeHref="/"
         stationCode={guestListenState.code ?? code}
-        stationName={guestListenState.name}
-        stationDescription={guestListenState.description}
-        stationPlaybackSeconds={guestListenState.currentPosition ?? 0}
+              stationName={guestListenState.name}
+              stationDescription={guestListenState.description}
+              stationCoverImage={guestListenState.coverImage ?? null}
+              stationPlaybackSeconds={guestListenState.currentPosition ?? 0}
         isPlaying={
           !!guestListenState.currentTrackId && !guestListenState.isPaused
         }
@@ -855,6 +859,7 @@ export default function StationPage({
         stationCode={station?.code ?? code}
         stationName={station?.name}
         stationDescription={station?.description}
+        stationCoverImage={station?.coverImage ?? null}
         stationPlaybackSeconds={playback.currentPosition}
         isPlaying={isPlaying}
         isPaused={isPaused}
@@ -883,7 +888,7 @@ export default function StationPage({
           />
         ) : (
           <p className="text-xs text-[--text-muted] mt-6">
-            Сейчас ничего не играет.
+            Nothing is playing right now.
           </p>
         )}
       </ListenOnlyPageShell>
@@ -940,23 +945,45 @@ export default function StationPage({
             {mounted &&
               (theme === "dark" ? <Sun size={14} /> : <Moon size={14} />)}
           </Button>
-          {(isOwner || isAdmin) && (
+          {user && (
             <Button
               variant="ghost"
               size="icon-sm"
               onClick={() =>
                 setContentMode((v) =>
-                  v === "settings" ? "station" : "settings",
+                  v === "user-settings" ? "station" : "user-settings",
                 )
               }
               className={
-                contentMode === "settings"
+                contentMode === "user-settings"
                   ? "bg-[--bg-subtle] text-[--text-primary]"
                   : ""
               }
+              title="User settings"
             >
-              <Settings size={14} />
+              <UserRound size={14} />
             </Button>
+          )}
+          {(isOwner || isAdmin) && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() =>
+                  setContentMode((v) =>
+                    v === "settings" ? "station" : "settings",
+                  )
+                }
+                className={
+                  contentMode === "settings"
+                    ? "bg-[--bg-subtle] text-[--text-primary]"
+                    : ""
+                }
+                title="Station settings"
+              >
+                <Settings size={14} />
+              </Button>
+            </>
           )}
         </div>
         {compactNowPlaying && (
@@ -982,6 +1009,7 @@ export default function StationPage({
               stationCode={station?.code ?? code}
               stationName={station?.name}
               stationDescription={station?.description}
+              stationCoverImage={station?.coverImage ?? null}
               stationPlaybackSeconds={playback.currentPosition}
               messages={chat}
               onSendMessage={sendChatMessage}
@@ -999,6 +1027,7 @@ export default function StationPage({
                 code: station?.code ?? code,
                 name: station?.name ?? "",
                 description: station?.description ?? null,
+                coverImage: station?.coverImage ?? null,
                 accessMode: station?.accessMode ?? "PRIVATE",
                 isPasswordProtected: station?.isPasswordProtected ?? false,
                 crossfadeDuration: station?.crossfadeDuration ?? 3,
@@ -1011,6 +1040,8 @@ export default function StationPage({
                 setStation({ ...station, ...patch });
               }}
             />
+          ) : contentMode === "user-settings" ? (
+            <UserSettingsPanel onBack={() => setContentMode("station")} />
           ) : contentMode === "add-tracks" ? (
             <AddTracksPanel
               stationId={station?.id ?? ""}

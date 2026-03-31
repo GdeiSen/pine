@@ -5,6 +5,7 @@ import {
   BadRequestException,
   ForbiddenException,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
 import { ConfigService } from '@nestjs/config'
@@ -14,6 +15,7 @@ import * as path from 'path'
 import { v4 as uuid } from 'uuid'
 import { USER_STORAGE_LIMIT_BYTES } from '@web-radio/shared'
 import { PrismaService } from '../../prisma/prisma.service'
+import { StorageService } from '../storage/storage.service'
 import { RegisterDto } from './dto/register.dto'
 import { LoginDto } from './dto/login.dto'
 import { UpdateMeDto } from './dto/update-me.dto'
@@ -31,6 +33,7 @@ export class AuthService {
     private prisma: PrismaService,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private storageService: StorageService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -90,7 +93,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid refresh token')
     }
 
-    await this.prisma.refreshToken.delete({ where: { token: refreshToken } })
+    await this.prisma.refreshToken.deleteMany({ where: { token: refreshToken } })
 
     const user = await this.prisma.user.findUnique({
       where: { id: stored.userId },
@@ -177,6 +180,112 @@ export class AuthService {
     return {
       ...updated,
       storage,
+    }
+  }
+
+  async changePassword(userId: string, currentPassword: string, newPassword: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, passwordHash: true },
+    })
+    if (!user) throw new UnauthorizedException()
+
+    const isValidCurrent = await bcrypt.compare(currentPassword, user.passwordHash)
+    if (!isValidCurrent) {
+      throw new BadRequestException('Current password is incorrect')
+    }
+
+    const normalizedNextPassword = newPassword.trim()
+    if (normalizedNextPassword.length < 6 || normalizedNextPassword.length > 100) {
+      throw new BadRequestException('New password must be between 6 and 100 characters')
+    }
+
+    const isSamePassword = await bcrypt.compare(normalizedNextPassword, user.passwordHash)
+    if (isSamePassword) {
+      throw new BadRequestException('New password must be different from current password')
+    }
+
+    const passwordHash = await bcrypt.hash(normalizedNextPassword, 12)
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    })
+
+    await this.prisma.refreshToken.deleteMany({ where: { userId } })
+    return { success: true }
+  }
+
+  async uploadAvatar(userId: string, file: Express.Multer.File) {
+    if (!String(file.mimetype ?? '').toLowerCase().startsWith('image/')) {
+      this.safeDeleteTempFile(file.path)
+      throw new BadRequestException('Unsupported image format')
+    }
+
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg'
+    const objectKey = `users/${userId}/avatar-${uuid()}${ext}`
+
+    try {
+      await this.storageService.uploadFile('covers', objectKey, file.path, file.mimetype)
+      const encodedKey = Buffer.from(objectKey, 'utf8').toString('base64url')
+      const avatarUrl = `/api/auth/avatar/${userId}/${encodedKey}?v=${Date.now()}`
+
+      const current = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { avatar: true },
+      })
+      const previousKey = this.extractAvatarObjectKey(current?.avatar, userId)
+
+      const updated = await this.prisma.user.update({
+        where: { id: userId },
+        data: { avatar: avatarUrl },
+        select: {
+          id: true,
+          email: true,
+          username: true,
+          avatar: true,
+          createdAt: true,
+          lastSeenAt: true,
+        },
+      })
+
+      if (previousKey && previousKey !== objectKey) {
+        await this.storageService.deleteObject('covers', previousKey).catch(() => undefined)
+      }
+
+      return updated
+    } finally {
+      this.safeDeleteTempFile(file.path)
+    }
+  }
+
+  async streamAvatar(userId: string, encodedKey: string, res: any) {
+    let objectKey = ''
+    try {
+      objectKey = Buffer.from(encodedKey, 'base64url').toString('utf8')
+    } catch {
+      throw new NotFoundException('Avatar not found')
+    }
+    if (!objectKey.startsWith(`users/${userId}/avatar-`)) {
+      throw new NotFoundException('Avatar not found')
+    }
+
+    const mimeType = this.getAvatarMimeTypeByExt(objectKey)
+    try {
+      const stream = await this.storageService.getObjectStream('covers', objectKey)
+      res.set({
+        'Content-Type': mimeType,
+        'Cache-Control': 'public, max-age=86400',
+      })
+      stream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(404).end()
+          return
+        }
+        res.end()
+      })
+      stream.pipe(res)
+    } catch {
+      throw new NotFoundException('Avatar not found')
     }
   }
 
@@ -287,5 +396,34 @@ export class AuthService {
       limitBytes,
       availableBytes: Math.max(limitBytes - usedBytes, 0),
     }
+  }
+
+  private safeDeleteTempFile(filePath: string | undefined) {
+    if (!filePath) return
+    try {
+      fs.unlinkSync(filePath)
+    } catch {
+      // no-op
+    }
+  }
+
+  private extractAvatarObjectKey(rawAvatar: string | null | undefined, userId: string) {
+    if (!rawAvatar) return null
+    const match = rawAvatar.match(new RegExp(`^/api/auth/avatar/${userId}/([^?]+)`))
+    if (!match?.[1]) return null
+    try {
+      return Buffer.from(match[1], 'base64url').toString('utf8')
+    } catch {
+      return null
+    }
+  }
+
+  private getAvatarMimeTypeByExt(objectKey: string) {
+    const ext = path.extname(objectKey).toLowerCase()
+    if (ext === '.png') return 'image/png'
+    if (ext === '.webp') return 'image/webp'
+    if (ext === '.gif') return 'image/gif'
+    if (ext === '.avif') return 'image/avif'
+    return 'image/jpeg'
   }
 }

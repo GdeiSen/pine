@@ -83,6 +83,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   const stateRef = useRef(state)
   const playbackRef = useRef(playback)
   const isDirectModeRef = useRef(isDirectMode)
+  const autoRestartTrackIdRef = useRef<string | null>(null)
   stateRef.current = state
   playbackRef.current = playback
   isDirectModeRef.current = isDirectMode
@@ -128,6 +129,39 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       setAudioConnection({ state: 'idle', message: null, diagnostics: null })
     }
   }, [setAudioConnection])
+
+  // Guest fail-safe: if current track is known but playback is still not started,
+  // trigger a single restart per track instead of waiting for TRACK_CHANGED.
+  useEffect(() => {
+    const currentTrackId = state.currentTrackId
+    const isTrackPaused = !!state.isPaused
+
+    if (!currentTrackId || isTrackPaused) {
+      autoRestartTrackIdRef.current = null
+      return
+    }
+
+    if (playback.audioConnectionState === 'playing') {
+      autoRestartTrackIdRef.current = null
+      return
+    }
+
+    if (autoRestartTrackIdRef.current === currentTrackId) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      const latestState = stateRef.current
+      const latestTrackId = latestState.currentTrackId
+      if (!latestTrackId || latestTrackId !== currentTrackId || latestState.isPaused) return
+      if (playbackRef.current.audioConnectionState === 'playing') return
+
+      autoRestartTrackIdRef.current = currentTrackId
+      void playbackRef.current.restartAudio()
+    }, 1300)
+
+    return () => window.clearTimeout(timer)
+  }, [playback.audioConnectionState, state.currentTrackId, state.isPaused])
 
   // Tick position forward locally
   useEffect(() => {
@@ -193,11 +227,6 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       if (cancelled || !info?.streamUrl) return
       setState((prev) => ({ ...prev, streamUrl: info.streamUrl }))
     }
-
-    socket.connect()
-    socket.emit(WS_EVENTS_V2.STATION_JOIN, { code })
-
-    void refreshStreamUrl()
 
     const handleStationState = (data: any) => {
       if (cancelled) return
@@ -344,6 +373,11 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     }
     socket.on(WS_EVENTS_V2.LISTENER_LEFT, handleListenerLeft)
 
+    socket.connect()
+    socket.emit(WS_EVENTS_V2.STATION_JOIN, { code })
+
+    void refreshStreamUrl()
+
     const heartbeat = window.setInterval(() => {
       socket.emit(WS_EVENTS_V2.HEARTBEAT)
     }, 30_000)
@@ -363,7 +397,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   }, [code])
 
   if (!state.currentTrackId || !state.currentTrack) {
-    return <p className="text-xs text-[--text-muted] mt-6">Сейчас ничего не играет.</p>
+    return <p className="text-xs text-[--text-muted] mt-6">Nothing is playing right now.</p>
   }
 
   return (

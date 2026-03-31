@@ -5,6 +5,9 @@ const streamProxyTarget = process.env.NEXT_PUBLIC_STREAM_PROXY_TARGET ?? 'http:/
 
 const nextConfig: NextConfig = {
   transpilePackages: ['@web-radio/shared'],
+  experimental: {
+    proxyClientMaxBodySize: 200 * 1024 * 1024,
+  } as any,
   images: {
     remotePatterns: [
       { protocol: 'http', hostname: 'localhost', port: '3001' },
