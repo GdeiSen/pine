@@ -14,6 +14,8 @@ const SOFT_ALIGN_THRESHOLD_S = 0.35
 const TRANSITION_GUARD_MS = 2_500
 const RESUME_SYNC_GRACE_MS = 1_100
 const RESUME_SYNC_SOFT_FORWARD_LIMIT_S = 1.15
+const TRACK_START_STABILIZE_MS = 1_400
+const TRACK_END_SEEK_GUARD_S = 0.4
 const VOLUME_FADE_IN_MS = 1200
 const VOLUME_FADE_OUT_MS = 1200
 
@@ -84,6 +86,7 @@ export function useDirectPlaybackEngine({
   const connectionStateRef = useRef<AudioConnectionState>('idle')
   const connectionMessageRef = useRef<string | null>(null)
   const needsRestartRef = useRef(false)
+  const lastTrackLoadAtRef = useRef(0)
   const volumeFadeRafRef = useRef<number | null>(null)
   const volumeFadeTokenRef = useRef(0)
   const targetVolumeRef = useRef(clampVolume(volume))
@@ -248,6 +251,13 @@ export function useDirectPlaybackEngine({
     const audio = audioRef.current
     if (!audio || audio.readyState < 1) return
     if (!Number.isFinite(targetPosition)) return
+    if (
+      mode === 'soft' &&
+      !isPaused &&
+      Date.now() - lastTrackLoadAtRef.current < TRACK_START_STABILIZE_MS
+    ) {
+      return
+    }
     const expected =
       trackDuration > 0 ? Math.min(Math.max(0, targetPosition), trackDuration) : Math.max(0, targetPosition)
     const actual = audio.currentTime
@@ -270,7 +280,7 @@ export function useDirectPlaybackEngine({
     if (expected - actual > SOFT_ALIGN_THRESHOLD_S || actual - expected > DRIFT_THRESHOLD_S) {
       audio.currentTime = expected
     }
-  }, [isResumeSyncGraceActive, trackDuration])
+  }, [isPaused, isResumeSyncGraceActive, trackDuration])
 
   const seekToExpectedPosition = useCallback(() => {
     const expected = getExpectedPosition()
@@ -327,7 +337,19 @@ export function useDirectPlaybackEngine({
       const url = normalizeMediaUrl(buildStreamUrl(id))
       const sourceChanged = sourceUrlRef.current !== url
 
-      pendingTargetPositionRef.current = targetPosition
+      const desired = desiredStateRef.current
+      const normalizedTarget = Number.isFinite(targetPosition) ? Math.max(0, targetPosition) : 0
+      let safeTarget = normalizedTarget
+      if (!desired.isPaused && trackDuration > 0) {
+        const bounded = Math.min(normalizedTarget, trackDuration)
+        safeTarget =
+          bounded >= Math.max(trackDuration - TRACK_END_SEEK_GUARD_S, 0)
+            ? 0
+            : bounded
+      }
+
+      pendingTargetPositionRef.current = safeTarget
+      lastTrackLoadAtRef.current = Date.now()
       playTokenRef.current += 1
       clearTransitionState()
       clearResumeSyncGrace()
@@ -347,7 +369,6 @@ export function useDirectPlaybackEngine({
         audio.load()
       }
 
-      const desired = desiredStateRef.current
       if (desired.trackId !== id) return
 
       if (desired.isPaused) {
@@ -362,7 +383,7 @@ export function useDirectPlaybackEngine({
 
       void startPlayback('Resuming track...')
     },
-    [clearResumeSyncGrace, clearTransitionState, setConnectionStatus, startPlayback, stopVolumeFade],
+    [clearResumeSyncGrace, clearTransitionState, setConnectionStatus, startPlayback, stopVolumeFade, trackDuration],
   )
 
   // Mount / unmount
