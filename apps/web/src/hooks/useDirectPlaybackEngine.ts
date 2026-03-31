@@ -473,6 +473,42 @@ export function useDirectPlaybackEngine({
     [clearStallRecovery, getExpectedPosition, loadTrack, setConnectionStatus, startPlayback],
   )
 
+  const engineCallbacksRef = useRef({
+    applyTargetPosition,
+    clearResumeSyncGrace,
+    clearStallRecovery,
+    clearTransitionState,
+    isTransitionGuardActiveForTrack,
+    scheduleStallRecovery,
+    setConnectionStatus,
+    startPlayback,
+    stopVolumeFade,
+  })
+
+  useEffect(() => {
+    engineCallbacksRef.current = {
+      applyTargetPosition,
+      clearResumeSyncGrace,
+      clearStallRecovery,
+      clearTransitionState,
+      isTransitionGuardActiveForTrack,
+      scheduleStallRecovery,
+      setConnectionStatus,
+      startPlayback,
+      stopVolumeFade,
+    }
+  }, [
+    applyTargetPosition,
+    clearResumeSyncGrace,
+    clearStallRecovery,
+    clearTransitionState,
+    isTransitionGuardActiveForTrack,
+    scheduleStallRecovery,
+    setConnectionStatus,
+    startPlayback,
+    stopVolumeFade,
+  ])
+
   // Mount / unmount
   useEffect(() => {
     mountedRef.current = true
@@ -486,7 +522,7 @@ export function useDirectPlaybackEngine({
       const target = pendingTargetPositionRef.current
       if (target === null || !Number.isFinite(target)) return
       if (audio.readyState < HTMLMediaElement.HAVE_METADATA) return
-      applyTargetPosition(target, mode)
+      engineCallbacksRef.current.applyTargetPosition(target, mode)
       pendingTargetPositionRef.current = null
     }
 
@@ -511,51 +547,51 @@ export function useDirectPlaybackEngine({
 
     const onCanPlay = () => {
       if (!hasExpectedSource()) return
-      clearStallRecovery(true)
+      engineCallbacksRef.current.clearStallRecovery(true)
       alignPendingTarget('strict')
       const desired = desiredStateRef.current
       if (!desired.trackId) return
       if (desired.trackId !== currentTrackIdRef.current) return
-      if (isTransitionGuardActiveForTrack(desired.trackId)) return
+      if (engineCallbacksRef.current.isTransitionGuardActiveForTrack(desired.trackId)) return
       if (desired.isPaused) {
-        setConnectionStatus('paused', null)
+        engineCallbacksRef.current.setConnectionStatus('paused', null)
         return
       }
       if (audio.paused) {
-        void startPlayback('Loading track...')
+        void engineCallbacksRef.current.startPlayback('Loading track...')
       }
     }
 
     const onPlaying = () => {
       const desired = desiredStateRef.current
       if (!hasExpectedSource()) return
-      clearStallRecovery(true)
-      if (isTransitionGuardActiveForTrack(desired.trackId)) {
+      engineCallbacksRef.current.clearStallRecovery(true)
+      if (engineCallbacksRef.current.isTransitionGuardActiveForTrack(desired.trackId)) {
         audio.pause()
-        setConnectionStatus('connecting', 'Switching track...')
+        engineCallbacksRef.current.setConnectionStatus('connecting', 'Switching track...')
         return
       }
       alignPendingTarget('soft')
-      setConnectionStatus('playing', null)
+      engineCallbacksRef.current.setConnectionStatus('playing', null)
     }
 
     const onWaiting = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId || desired.isPaused) return
-      scheduleStallRecovery('waiting')
+      engineCallbacksRef.current.scheduleStallRecovery('waiting')
     }
 
     const onStalled = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId || desired.isPaused) return
-      scheduleStallRecovery('stalled')
+      engineCallbacksRef.current.scheduleStallRecovery('stalled')
     }
 
     const onPause = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId || !desired.isPaused) return
-      clearStallRecovery(true)
-      setConnectionStatus('paused', null)
+      engineCallbacksRef.current.clearStallRecovery(true)
+      engineCallbacksRef.current.setConnectionStatus('paused', null)
     }
 
     const onError = () => {
@@ -572,11 +608,11 @@ export function useDirectPlaybackEngine({
       })
 
       if (desired.isPaused) {
-        setConnectionStatus('paused', null)
+        engineCallbacksRef.current.setConnectionStatus('paused', null)
         return
       }
 
-      scheduleStallRecovery('error')
+      engineCallbacksRef.current.scheduleStallRecovery('error')
     }
 
     audio.addEventListener('loadedmetadata', onLoadedMetadata)
@@ -590,7 +626,7 @@ export function useDirectPlaybackEngine({
 
     return () => {
       mountedRef.current = false
-      stopVolumeFade()
+      engineCallbacksRef.current.stopVolumeFade()
       setMediaDuration(null)
       audio.removeEventListener('loadedmetadata', onLoadedMetadata)
       audio.removeEventListener('durationchange', updateMediaDuration)
@@ -606,25 +642,15 @@ export function useDirectPlaybackEngine({
       audioRef.current = null
       sourceUrlRef.current = null
       pendingTargetPositionRef.current = null
-      clearTransitionState()
-      clearResumeSyncGrace()
-      clearStallRecovery(true)
+      engineCallbacksRef.current.clearTransitionState()
+      engineCallbacksRef.current.clearResumeSyncGrace()
+      engineCallbacksRef.current.clearStallRecovery(true)
       if (driftTimerRef.current !== null) {
         window.clearInterval(driftTimerRef.current)
         driftTimerRef.current = null
       }
     }
-  }, [
-    applyTargetPosition,
-    clearResumeSyncGrace,
-    clearStallRecovery,
-    clearTransitionState,
-    isTransitionGuardActiveForTrack,
-    scheduleStallRecovery,
-    setConnectionStatus,
-    startPlayback,
-    stopVolumeFade,
-  ])
+  }, [])
 
   // Volume
   useEffect(() => {

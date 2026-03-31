@@ -164,7 +164,10 @@ export function TrackInfo({
 
     return () => {
       controller.abort();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (objectUrl) {
+        const staleObjectUrl = objectUrl;
+        window.setTimeout(() => URL.revokeObjectURL(staleObjectUrl), 1500);
+      }
     };
   }, [coverUrl, track?.id]);
 
