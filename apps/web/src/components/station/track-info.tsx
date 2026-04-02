@@ -38,6 +38,47 @@ const SOFT_FADE_FAST_TRANSITION = {
   ease: [0.19, 1, 0.22, 1] as const,
 };
 
+function getTrackFormatLabel(filename?: string | null, quality?: string | null) {
+  const extension = filename?.trim().split(".").pop()?.trim().toLowerCase() ?? "";
+  switch (extension) {
+    case "mp3":
+      return "MP3";
+    case "flac":
+      return "FLAC";
+    case "wav":
+      return "WAV";
+    case "m4a":
+      return "M4A";
+    case "aac":
+      return "AAC";
+    case "ogg":
+      return "OGG";
+    case "opus":
+      return "OPUS";
+    default:
+      return quality === "LOSSLESS" ? "LOSSLESS" : null;
+  }
+}
+
+function getTrackDeliveryLabel(args: { bitrate?: number | null; quality?: string | null }) {
+  if (args.quality === "LOSSLESS") {
+    return "Lossless";
+  }
+  if (typeof args.bitrate === "number" && Number.isFinite(args.bitrate) && args.bitrate > 0) {
+    return `${Math.max(1, Math.round(args.bitrate))} kbps`;
+  }
+  switch (args.quality) {
+    case "HIGH":
+      return "High quality";
+    case "MEDIUM":
+      return "Medium quality";
+    case "LOW":
+      return "Low quality";
+    default:
+      return null;
+  }
+}
+
 type LoopMode = "none" | "track" | "queue";
 
 interface TrackInfoProps {
@@ -199,20 +240,12 @@ export function TrackInfo({
     }
     return "Checking player state and preparing playback.";
   })();
-  const trackExtension = (() => {
-    const name = track?.filename?.trim();
-    if (!name) return null;
-    const dotIndex = name.lastIndexOf(".");
-    if (dotIndex < 0 || dotIndex === name.length - 1) return null;
-    return name.slice(dotIndex + 1).toUpperCase();
-  })();
-  const trackBitrateLabel =
-    typeof track?.bitrate === "number" && Number.isFinite(track.bitrate)
-      ? `${Math.max(1, Math.round(track.bitrate))} kbps`
-      : null;
-  const leftMeta = [trackExtension, trackBitrateLabel]
-    .filter(Boolean)
-    .join(" · ");
+  const trackFormatLabel = getTrackFormatLabel(track?.filename, track?.quality);
+  const trackDeliveryLabel = getTrackDeliveryLabel({
+    bitrate: track?.bitrate,
+    quality: track?.quality,
+  });
+  const leftMeta = [trackFormatLabel, trackDeliveryLabel].filter(Boolean).join(" · ");
   const albumYearLabel = [track?.album, track?.year].filter(Boolean).join(" · ");
   const genreLabel = track?.genre?.trim() ?? "";
   const hasAlbumYear = albumYearLabel.length > 0;

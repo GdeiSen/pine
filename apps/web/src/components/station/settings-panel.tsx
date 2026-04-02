@@ -539,9 +539,10 @@ export function SettingsPanel({
 
               <div className="mt-5">
                 <p className="-mt-4 mb-4 text-sm text-[--text-muted]">
-                  Select stream quality based on listener network conditions:
-                  lower quality saves traffic and reduces buffering risk, while
-                  higher quality gives clearer and richer audio playback.
+                  Direct playback currently sends the original uploaded file to
+                  listeners. Quality presets below are not applied yet because
+                  alternate low/medium/high transcodes are not generated in the
+                  current direct-only pipeline.
                 </p>
                 <div className="flex flex-wrap gap-2">
                   {QUALITY_OPTIONS.map((opt) => {
@@ -550,8 +551,9 @@ export function SettingsPanel({
                       <button
                         key={opt.value}
                         type="button"
+                        disabled
                         onClick={() => setStreamQuality(opt.value)}
-                        className="w-[138px] h-[122px] rounded-xl p-3 transition-colors text-left shrink-0 flex flex-col justify-between"
+                        className="w-[138px] h-[122px] rounded-xl p-3 transition-colors text-left shrink-0 flex flex-col justify-between disabled:cursor-not-allowed"
                         style={{
                           background: active
                             ? isDarkTheme
@@ -567,6 +569,7 @@ export function SettingsPanel({
                                 : "rgba(24,23,15,0.55)"
                               : "var(--border)"
                           }`,
+                          opacity: active ? 0.92 : 0.6,
                         }}
                       >
                         <div className="text-[--text-primary]">{opt.icon}</div>
@@ -582,6 +585,11 @@ export function SettingsPanel({
                     );
                   })}
                 </div>
+                <p className="mt-3 text-xs text-[--text-muted]">
+                  To make these presets work for listeners, the server needs a
+                  real transcode ladder such as `LOW / MEDIUM / HIGH` assets and
+                  quality-aware stream selection.
+                </p>
               </div>
             </div>
           </motion.section>
