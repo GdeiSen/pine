@@ -231,6 +231,9 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
           !!pendingDirectCommandRef.current && Date.now() <= pendingDirectCommandRef.current.expiresAt
 
         if (isDirectModeRef.current) {
+          if (playbackRef.current.isTransportTransitionActive()) {
+            return prev
+          }
           if (pendingDirectActive) {
             return prev
           }
@@ -310,6 +313,10 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
       if (offsetMs !== null) serverOffsetMsRef.current = offsetMs
       const nextPlaybackMode = data.station?.playbackMode ?? stateRef.current.playbackMode ?? DEFAULT_PLAYBACK_MODE
       const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
+      const previousTrackId = stateRef.current.currentTrackId ?? null
+      const nextTrackId = data.currentTrack?.id ?? null
+      const directTransitionActive =
+        nextIsDirectMode && playbackRef.current.isTransportTransitionActive()
 
       const targetPosition = getEstimatedServerPosition({
         currentPosition: data.currentPosition ?? 0,
@@ -319,11 +326,13 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         serverOffsetMs: serverOffsetMsRef.current,
         trackStartedAt: startedAt,
       })
-      const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
+      const directAudio =
+        nextIsDirectMode && !directTransitionActive ? playbackRef.current.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
       const position =
         nextIsDirectMode &&
+        nextTrackId === previousTrackId &&
         !data.isPaused &&
         directActualPosition !== null &&
         playbackRef.current.audioConnectionState === 'playing'
@@ -391,11 +400,15 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         serverOffsetMs: serverOffsetMsRef.current,
         trackStartedAt: startedAt,
       })
-      const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
+      const directTransitionActive =
+        nextIsDirectMode && playbackRef.current.isTransportTransitionActive()
+      const directAudio =
+        nextIsDirectMode && !directTransitionActive ? playbackRef.current.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
       const position =
         nextIsDirectMode &&
+        nextTrackId === previousTrackId &&
         !data.isPaused &&
         directActualPosition !== null &&
         playbackRef.current.audioConnectionState === 'playing'
@@ -493,12 +506,16 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         serverOffsetMs: serverOffsetMsRef.current,
         trackStartedAt: startedAt,
       })
-      const directAudio = nextIsDirectMode ? playbackRef.current.audioRef.current : null
+      const directTransitionActive =
+        nextIsDirectMode && playbackRef.current.isTransportTransitionActive()
+      const directAudio =
+        nextIsDirectMode && !directTransitionActive ? playbackRef.current.audioRef.current : null
       const directActualPosition =
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
       const requiresAuthoritativeDirectSync =
         nextIsDirectMode &&
-        (nextIsPaused ||
+        (directTransitionActive ||
+          nextIsPaused ||
           playbackRef.current.audioConnectionState !== 'playing' ||
           commandType === PlaybackCommandType.PLAY ||
           commandType === PlaybackCommandType.PAUSE ||

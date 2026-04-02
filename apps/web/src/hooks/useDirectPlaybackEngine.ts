@@ -15,12 +15,17 @@ const RESUME_SYNC_SOFT_FORWARD_LIMIT_S = 1.15
 const TRACK_START_STABILIZE_MS = 3_200
 const TRACK_OPENING_GRACE_S = 3
 const TRACK_END_SEEK_GUARD_S = 0.4
+const SEEK_TRANSITION_THRESHOLD_S = 0.9
 const STALL_RECOVERY_DELAY_MS = 5_500
 const TRACK_OPEN_RECOVERY_GRACE_MS = 12_000
 const STALL_RECOVERY_MAX_RETRIES = 2
 const VOLUME_FADE_IN_MS = 1600
 const VOLUME_FADE_OUT_MS = 380
+const SEEK_FADE_OUT_MS = 220
 const PREFETCH_CLEANUP_DELAY_MS = 1_000
+const TRANSPORT_TRANSITION_MAX_MS = 10_000
+
+type DirectTransportPhase = 'idle' | 'pause' | 'track-change' | 'seek'
 
 type UseDirectPlaybackEngineArgs = {
   trackId: string | null
@@ -122,6 +127,17 @@ export function useDirectPlaybackEngine({
   const sourcePlaybackStartedRef = useRef(false)
   const prefetchAudioRef = useRef<HTMLAudioElement | null>(null)
   const prefetchUrlRef = useRef<string | null>(null)
+  const transportTransitionRef = useRef<{
+    token: number
+    phase: DirectTransportPhase
+    trackId: string | null
+    expiresAt: number
+  }>({
+    token: 0,
+    phase: 'idle',
+    trackId: null,
+    expiresAt: 0,
+  })
 
   const [audioConnectionState, setAudioConnectionState] = useState<AudioConnectionState>('idle')
   const [audioConnectionMessage, setAudioConnectionMessage] = useState<string | null>(null)
@@ -302,6 +318,54 @@ export function useDirectPlaybackEngine({
     [clearTransitionState],
   )
 
+  const finishTransportTransition = useCallback((token?: number) => {
+    const transition = transportTransitionRef.current
+    if (transition.phase === 'idle') return
+    if (typeof token === 'number' && transition.token !== token) return
+    transportTransitionRef.current = {
+      token: transition.token,
+      phase: 'idle',
+      trackId: null,
+      expiresAt: 0,
+    }
+  }, [])
+
+  const isTransportTransitionActive = useCallback(() => {
+    const transition = transportTransitionRef.current
+    if (transition.phase === 'idle') return false
+    if (Date.now() <= transition.expiresAt) return true
+    finishTransportTransition(transition.token)
+    return false
+  }, [finishTransportTransition])
+
+  const getTransportTransitionPhase = useCallback((): DirectTransportPhase => {
+    if (!isTransportTransitionActive()) return 'idle'
+    return transportTransitionRef.current.phase
+  }, [isTransportTransitionActive])
+
+  const isTransportTransitionTokenCurrent = useCallback(
+    (token: number) => {
+      if (!isTransportTransitionActive()) return false
+      return transportTransitionRef.current.token === token
+    },
+    [isTransportTransitionActive],
+  )
+
+  const beginTransportTransition = useCallback(
+    (phase: DirectTransportPhase, trackIdForTransition?: string | null) => {
+      stopVolumeFade()
+      const nextToken = transportTransitionRef.current.token + 1
+      transportTransitionRef.current = {
+        token: nextToken,
+        phase,
+        trackId: trackIdForTransition ?? desiredStateRef.current.trackId ?? currentTrackIdRef.current,
+        expiresAt: Date.now() + TRANSPORT_TRANSITION_MAX_MS,
+      }
+      return nextToken
+    },
+    [stopVolumeFade],
+  )
+
   const applyTargetPosition = useCallback((targetPosition: number, mode: 'strict' | 'soft' = 'soft') => {
     const audio = audioRef.current
     if (!audio || audio.readyState < 1) return
@@ -380,6 +444,7 @@ export function useDirectPlaybackEngine({
       } catch (error) {
         if (!mountedRef.current || token !== playTokenRef.current) return
         if (isAutoplayBlock(error)) {
+          finishTransportTransition()
           setNeedsRestart(true)
           setConnectionStatus('blocked', 'Browser blocked audio playback. Tap restart.')
           return
@@ -391,7 +456,14 @@ export function useDirectPlaybackEngine({
         setConnectionStatus('reconnecting', 'Failed to start track')
       }
     },
-    [armResumeSyncGrace, fadeInToTargetVolume, setConnectionStatus, setNeedsRestart, stopVolumeFade],
+    [
+      armResumeSyncGrace,
+      fadeInToTargetVolume,
+      finishTransportTransition,
+      setConnectionStatus,
+      setNeedsRestart,
+      stopVolumeFade,
+    ],
   )
 
   const beginCommandWait = useCallback(
@@ -469,11 +541,151 @@ export function useDirectPlaybackEngine({
     ],
   )
 
+  const performPauseTransition = useCallback(
+    (targetPosition: number) => {
+      const normalizedTarget = Number.isFinite(targetPosition) ? Math.max(0, targetPosition) : 0
+      const audio = audioRef.current
+
+      pendingTargetPositionRef.current = normalizedTarget
+      clearResumeSyncGrace()
+      clearStallRecovery(true)
+
+      const finalizePause = (token: number) => {
+        if (!isTransportTransitionTokenCurrent(token)) return
+        const currentAudio = audioRef.current
+        if (!currentAudio) return
+
+        if (!desiredStateRef.current.isPaused) {
+          currentAudio.volume = targetVolumeRef.current
+          finishTransportTransition(token)
+          return
+        }
+
+        currentAudio.pause()
+        if (currentAudio.readyState >= 1) {
+          applyTargetPosition(normalizedTarget, 'strict')
+          pendingTargetPositionRef.current = null
+        }
+        currentAudio.volume = targetVolumeRef.current
+        setConnectionStatus('paused', null)
+        finishTransportTransition(token)
+      }
+
+      const token = beginTransportTransition('pause')
+
+      if (!audio || audio.paused || audio.readyState < HTMLMediaElement.HAVE_METADATA) {
+        finalizePause(token)
+        return
+      }
+
+      setConnectionStatus('buffering', 'Pausing track...')
+      fadeVolumeTo(0, VOLUME_FADE_OUT_MS, () => {
+        finalizePause(token)
+      })
+    },
+    [
+      applyTargetPosition,
+      beginTransportTransition,
+      clearResumeSyncGrace,
+      clearStallRecovery,
+      fadeVolumeTo,
+      finishTransportTransition,
+      isTransportTransitionTokenCurrent,
+      setConnectionStatus,
+    ],
+  )
+
+  const performTrackSwitch = useCallback(
+    (id: string, targetPosition: number) => {
+      const normalizedTarget = Number.isFinite(targetPosition) ? Math.max(0, targetPosition) : 0
+      const audio = audioRef.current
+
+      clearResumeSyncGrace()
+      clearStallRecovery(true)
+      const token = beginTransportTransition('track-change', id)
+
+      const switchSource = () => {
+        if (!isTransportTransitionTokenCurrent(token)) return
+        void loadTrack(id, normalizedTarget)
+      }
+
+      if (
+        !audio ||
+        audio.paused ||
+        audio.readyState < HTMLMediaElement.HAVE_METADATA ||
+        !sourcePlaybackStartedRef.current
+      ) {
+        switchSource()
+        return
+      }
+
+      setConnectionStatus('connecting', 'Switching track...')
+      fadeVolumeTo(0, VOLUME_FADE_OUT_MS, switchSource)
+    },
+    [
+      beginTransportTransition,
+      clearResumeSyncGrace,
+      clearStallRecovery,
+      fadeVolumeTo,
+      isTransportTransitionTokenCurrent,
+      loadTrack,
+      setConnectionStatus,
+    ],
+  )
+
+  const performSeekTransition = useCallback(
+    (targetPosition: number) => {
+      const audio = audioRef.current
+      if (!audio || !Number.isFinite(targetPosition)) return
+
+      const normalizedTarget = Math.max(0, targetPosition)
+      pendingTargetPositionRef.current = normalizedTarget
+      clearStallRecovery(true)
+
+      if (isPausedRef.current || audio.paused || audio.readyState < HTMLMediaElement.HAVE_METADATA) {
+        applyTargetPosition(normalizedTarget, 'strict')
+        pendingTargetPositionRef.current = null
+        return
+      }
+
+      const token = beginTransportTransition('seek')
+
+      const finishSeek = () => {
+        if (!isTransportTransitionTokenCurrent(token)) return
+        const currentAudio = audioRef.current
+        if (!currentAudio) return
+
+        currentAudio.currentTime = normalizedTarget
+        pendingTargetPositionRef.current = null
+        armResumeSyncGrace()
+        currentAudio.volume = 0
+        fadeInToTargetVolume()
+        setConnectionStatus('playing', null)
+        finishTransportTransition(token)
+      }
+
+      setConnectionStatus('buffering', 'Synchronizing playback...')
+      fadeVolumeTo(0, SEEK_FADE_OUT_MS, finishSeek)
+    },
+    [
+      applyTargetPosition,
+      armResumeSyncGrace,
+      beginTransportTransition,
+      clearStallRecovery,
+      fadeInToTargetVolume,
+      fadeVolumeTo,
+      finishTransportTransition,
+      isTransportTransitionTokenCurrent,
+      setConnectionStatus,
+    ],
+  )
+
   const scheduleStallRecovery = useCallback(
     (reason: 'waiting' | 'stalled' | 'error') => {
       const audio = audioRef.current
       const desired = desiredStateRef.current
       if (!audio || !desired.trackId || desired.isPaused) return
+      if (isTransportTransitionActive()) return
       if (stallRecoveryTimerRef.current !== null) return
 
       const openingTrack = !sourcePlaybackStartedRef.current
@@ -551,7 +763,14 @@ export function useDirectPlaybackEngine({
         )
       }
     },
-    [clearStallRecovery, getExpectedPosition, loadTrack, setConnectionStatus, startPlayback],
+    [
+      clearStallRecovery,
+      getExpectedPosition,
+      isTransportTransitionActive,
+      loadTrack,
+      setConnectionStatus,
+      startPlayback,
+    ],
   )
 
   const engineCallbacksRef = useRef({
@@ -559,7 +778,10 @@ export function useDirectPlaybackEngine({
     clearResumeSyncGrace,
     clearStallRecovery,
     clearTransitionState,
+    finishTransportTransition,
+    getTransportTransitionPhase,
     isTransitionGuardActiveForTrack,
+    isTransportTransitionActive,
     scheduleStallRecovery,
     setConnectionStatus,
     startPlayback,
@@ -572,7 +794,10 @@ export function useDirectPlaybackEngine({
       clearResumeSyncGrace,
       clearStallRecovery,
       clearTransitionState,
+      finishTransportTransition,
+      getTransportTransitionPhase,
       isTransitionGuardActiveForTrack,
+      isTransportTransitionActive,
       scheduleStallRecovery,
       setConnectionStatus,
       startPlayback,
@@ -583,7 +808,10 @@ export function useDirectPlaybackEngine({
     clearResumeSyncGrace,
     clearStallRecovery,
     clearTransitionState,
+    finishTransportTransition,
+    getTransportTransitionPhase,
     isTransitionGuardActiveForTrack,
+    isTransportTransitionActive,
     scheduleStallRecovery,
     setConnectionStatus,
     startPlayback,
@@ -648,6 +876,7 @@ export function useDirectPlaybackEngine({
       if (!hasExpectedSource()) return
       sourcePlaybackStartedRef.current = true
       engineCallbacksRef.current.clearStallRecovery(true)
+      const transportPhase = engineCallbacksRef.current.getTransportTransitionPhase()
       if (engineCallbacksRef.current.isTransitionGuardActiveForTrack(desired.trackId)) {
         audio.pause()
         engineCallbacksRef.current.setConnectionStatus('connecting', 'Switching track...')
@@ -655,6 +884,9 @@ export function useDirectPlaybackEngine({
       }
       alignPendingTarget('soft')
       engineCallbacksRef.current.setConnectionStatus('playing', null)
+      if (transportPhase === 'track-change' || transportPhase === 'seek') {
+        engineCallbacksRef.current.finishTransportTransition()
+      }
     }
 
     const onWaiting = () => {
@@ -671,9 +903,15 @@ export function useDirectPlaybackEngine({
 
     const onPause = () => {
       const desired = desiredStateRef.current
-      if (!desired.trackId || !desired.isPaused) return
+      const transportPhase = engineCallbacksRef.current.getTransportTransitionPhase()
+      if (!desired.trackId || (!desired.isPaused && transportPhase !== 'pause')) return
       engineCallbacksRef.current.clearStallRecovery(true)
+      alignPendingTarget('strict')
+      audio.volume = targetVolumeRef.current
       engineCallbacksRef.current.setConnectionStatus('paused', null)
+      if (transportPhase === 'pause') {
+        engineCallbacksRef.current.finishTransportTransition()
+      }
     }
 
     const onError = () => {
@@ -732,6 +970,7 @@ export function useDirectPlaybackEngine({
       prefetchUrlRef.current = null
       sourceUrlRef.current = null
       pendingTargetPositionRef.current = null
+      engineCallbacksRef.current.finishTransportTransition()
       engineCallbacksRef.current.clearTransitionState()
       engineCallbacksRef.current.clearResumeSyncGrace()
       engineCallbacksRef.current.clearStallRecovery(true)
@@ -819,6 +1058,7 @@ export function useDirectPlaybackEngine({
         pendingTargetPositionRef.current = null
         playTokenRef.current += 1
         sourcePlaybackStartedRef.current = false
+        finishTransportTransition()
         clearTransitionState()
         clearResumeSyncGrace()
         clearStallRecovery(true)
@@ -828,12 +1068,28 @@ export function useDirectPlaybackEngine({
     }
 
     if (trackId !== currentTrackIdRef.current) {
+      const previousTrackId = currentTrackIdRef.current
       currentTrackIdRef.current = trackId
       const nextTargetPosition = getExpectedPosition()
-      void loadTrack(trackId, nextTargetPosition >= 0 ? nextTargetPosition : 0)
+      const safeTargetPosition = nextTargetPosition >= 0 ? nextTargetPosition : 0
+      if (previousTrackId) {
+        void performTrackSwitch(trackId, safeTargetPosition)
+      } else {
+        void loadTrack(trackId, safeTargetPosition)
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [clearResumeSyncGrace, clearStallRecovery, clearTransitionState, setConnectionStatus, stopVolumeFade, trackId])
+  }, [
+    clearResumeSyncGrace,
+    clearStallRecovery,
+    clearTransitionState,
+    finishTransportTransition,
+    loadTrack,
+    performTrackSwitch,
+    setConnectionStatus,
+    stopVolumeFade,
+    trackId,
+  ])
 
   // Play/pause toggle (when track hasn't changed)
   useEffect(() => {
@@ -841,16 +1097,14 @@ export function useDirectPlaybackEngine({
     if (!audio || !trackId || trackId !== currentTrackIdRef.current) return
 
     if (isPaused) {
-      stopVolumeFade()
-      fadeVolumeTo(0, VOLUME_FADE_OUT_MS, () => {
-        const currentAudio = audioRef.current
-        if (!currentAudio) return
-        if (!desiredStateRef.current.isPaused) return
-        currentAudio.pause()
-        currentAudio.volume = targetVolumeRef.current
-      })
-      clearResumeSyncGrace()
-      setConnectionStatus('paused', null)
+      const expectedPos = getExpectedPosition()
+      performPauseTransition(
+        expectedPos >= 0
+          ? expectedPos
+          : Number.isFinite(audio.currentTime)
+            ? Math.max(0, audio.currentTime)
+            : 0,
+      )
     } else if (audio.paused) {
       const expectedPos = getExpectedPosition()
       const nextUrl = normalizeMediaUrl(buildStreamUrl(trackId))
@@ -868,19 +1122,37 @@ export function useDirectPlaybackEngine({
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPaused])
+  }, [getExpectedPosition, isPaused, performPauseTransition, startPlayback, trackId])
 
   // Keep the direct audio element aligned with authoritative playback state.
   useEffect(() => {
     const audio = audioRef.current
     if (!audio || !trackId || trackId !== currentTrackIdRef.current || audio.readyState < 1) return
+    if (isTransportTransitionActive()) return
     if (isPaused && !audio.paused) return
 
     const targetPosition = getTargetPosition()
     if (targetPosition < 0) return
 
+    if (!isPaused && !audio.paused && sourcePlaybackStartedRef.current) {
+      const actualPosition = Number.isFinite(audio.currentTime) ? Math.max(0, audio.currentTime) : 0
+      if (Math.abs(actualPosition - targetPosition) >= SEEK_TRANSITION_THRESHOLD_S) {
+        performSeekTransition(targetPosition)
+        return
+      }
+    }
+
     applyTargetPosition(targetPosition, isPaused ? 'strict' : 'soft')
-  }, [applyTargetPosition, currentPosition, getTargetPosition, isPaused, trackId, trackStartedAt])
+  }, [
+    applyTargetPosition,
+    currentPosition,
+    getTargetPosition,
+    isPaused,
+    isTransportTransitionActive,
+    performSeekTransition,
+    trackId,
+    trackStartedAt,
+  ])
 
   // Periodic drift correction
   useEffect(() => {
@@ -896,6 +1168,7 @@ export function useDirectPlaybackEngine({
       if (!audio || audio.paused || audio.readyState < 3) return
       if (!sourcePlaybackStartedRef.current) return
       if (connectionStateRef.current !== 'playing') return
+      if (isTransportTransitionActive()) return
       const expected = getExpectedPosition()
       if (expected < 0) return
       const actual = audio.currentTime
@@ -919,10 +1192,11 @@ export function useDirectPlaybackEngine({
         driftTimerRef.current = null
       }
     }
-  }, [getExpectedPosition, isPaused, trackId])
+  }, [getExpectedPosition, isPaused, isTransportTransitionActive, trackId])
 
   const restartAudio = useCallback(() => {
     if (!trackId) return
+    finishTransportTransition()
     clearTransitionState()
     clearResumeSyncGrace()
     const targetPosition = getExpectedPosition()
@@ -940,11 +1214,21 @@ export function useDirectPlaybackEngine({
     }
 
     void loadTrack(trackId, targetPosition >= 0 ? targetPosition : 0)
-  }, [applyTargetPosition, clearResumeSyncGrace, clearTransitionState, getExpectedPosition, loadTrack, startPlayback, trackId])
+  }, [
+    applyTargetPosition,
+    clearResumeSyncGrace,
+    clearTransitionState,
+    finishTransportTransition,
+    getExpectedPosition,
+    loadTrack,
+    startPlayback,
+    trackId,
+  ])
 
   const finishTransition = useCallback(() => {
+    finishTransportTransition()
     clearTransitionState()
-  }, [clearTransitionState])
+  }, [clearTransitionState, finishTransportTransition])
 
   const beginTransition = useCallback(
     (message = 'Switching track...') => {
@@ -965,15 +1249,26 @@ export function useDirectPlaybackEngine({
   const reportDrift = useCallback(
     (args: { targetPosition: number; actualPosition: number | null; syncType: string; rttMs: number | null }) => {
       const audio = audioRef.current
-      const pauseFadeInFlight = isPaused && !!audio && !audio.paused
       const syncType = args.syncType.toLowerCase()
       const authoritativeSync = isAuthoritativeDirectSyncType(syncType)
+      const transportPhase = getTransportTransitionPhase()
       const withinOpeningGraceWindow =
         Date.now() - lastTrackLoadAtRef.current < TRACK_START_STABILIZE_MS &&
         args.targetPosition <= TRACK_OPENING_GRACE_S &&
         (args.actualPosition ?? 0) <= TRACK_OPENING_GRACE_S &&
         args.targetPosition >= (args.actualPosition ?? 0)
-      if (!pauseFadeInFlight && audio && audio.readyState >= 1 && Number.isFinite(args.targetPosition)) {
+      const deferAuthoritativeSync =
+        transportPhase !== 'idle' ||
+        syncType === 'command:play' ||
+        syncType === 'command:pause' ||
+        syncType === 'command:seek'
+
+      if (
+        !deferAuthoritativeSync &&
+        audio &&
+        audio.readyState >= 1 &&
+        Number.isFinite(args.targetPosition)
+      ) {
         const strictSync =
           isPaused ||
           syncType === 'command:pause' ||
@@ -981,7 +1276,7 @@ export function useDirectPlaybackEngine({
         if (authoritativeSync && (!withinOpeningGraceWindow || strictSync)) {
           applyTargetPosition(args.targetPosition, strictSync ? 'strict' : 'soft')
         }
-      } else if (!pauseFadeInFlight && authoritativeSync) {
+      } else if (!deferAuthoritativeSync && authoritativeSync) {
         // Fall back to the engine state if the sync sample does not carry a usable target.
         seekToExpectedPosition()
       }
@@ -996,7 +1291,7 @@ export function useDirectPlaybackEngine({
         })
       }
     },
-    [applyTargetPosition, isPaused, seekToExpectedPosition],
+    [applyTargetPosition, getTransportTransitionPhase, isPaused, seekToExpectedPosition],
   )
 
   return {
@@ -1009,6 +1304,7 @@ export function useDirectPlaybackEngine({
     beginTransition,
     beginCommandWait,
     finishTransition,
+    isTransportTransitionActive,
     restartAudio,
     reportDrift,
   }

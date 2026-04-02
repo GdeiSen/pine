@@ -338,7 +338,8 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     const handleStationState = (state: any) => {
       window.clearTimeout(initialSyncTimeout)
-      const currentVersion = useStationStore.getState().playback.version
+      const currentStore = useStationStore.getState()
+      const currentVersion = currentStore.playback.version
       const incomingVersion = normalizePlaybackVersion(state.version)
       if (isStalePlaybackVersion(currentVersion, incomingVersion)) {
         setConnecting(false)
@@ -346,7 +347,6 @@ export function useStation(code: string, joinPassword?: string | null) {
         return
       }
       const startedAt = normalizeTrackStartedAt(state.trackStartedAt)
-      const nextTrackId = state.currentTrack?.id ?? null
       const nextIsPaused = state.isPaused ?? false
       const nextPosition = getEstimatedServerPosition({
         currentPosition:
@@ -362,6 +362,24 @@ export function useStation(code: string, joinPassword?: string | null) {
         serverOffsetMs: serverOffsetRef.current,
         trackStartedAt: startedAt,
       })
+      const previousTrackId = currentStore.playback.currentTrack?.id ?? null
+      const nextTrackId = state.currentTrack?.id ?? null
+      const directTransitionActive =
+        state.station?.playbackMode === 'DIRECT' && activeAudioRef.current.isTransportTransitionActive()
+      const directAudio =
+        state.station?.playbackMode === 'DIRECT' && !directTransitionActive
+          ? activeAudioRef.current.audioRef.current
+          : null
+      const directActualPosition =
+        directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
+      const resolvedPosition =
+        state.station?.playbackMode === 'DIRECT' &&
+        nextTrackId === previousTrackId &&
+        !nextIsPaused &&
+        directActualPosition !== null &&
+        activeAudioRef.current.audioConnectionState === 'playing'
+          ? Math.max(nextPosition, directActualPosition)
+          : nextPosition
       setStation(state.station)
       setQueue(state.queue ?? [])
       setMembers(state.members ?? [])
@@ -374,7 +392,7 @@ export function useStation(code: string, joinPassword?: string | null) {
         currentQueueType: state.currentQueueType ?? null,
         isPaused: nextIsPaused,
         trackStartedAt: startedAt,
-        currentPosition: nextPosition,
+        currentPosition: resolvedPosition,
         isPlaying: !!state.currentTrack && !nextIsPaused,
       })
       const pendingDirectCommand = getPendingDirectCommand()
@@ -626,11 +644,16 @@ export function useStation(code: string, joinPassword?: string | null) {
               trackStartedAt: nextTrackStartedAt,
             })
       const directAudio = stationPlaybackMode === 'DIRECT' ? activeAudio.audioRef.current : null
+      const directTransitionActive =
+        stationPlaybackMode === 'DIRECT' && activeAudio.isTransportTransitionActive()
       const directActualPosition =
-        directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
+        !directTransitionActive && directAudio && Number.isFinite(directAudio.currentTime)
+          ? Math.max(0, directAudio.currentTime)
+          : null
       const requiresAuthoritativeDirectSync =
         stationPlaybackMode === 'DIRECT' &&
         (freezePositionWhileReconnecting ||
+          directTransitionActive ||
           resolvedIsPaused ||
           activeAudio.audioConnectionState !== 'playing' ||
           commandType === PlaybackCommandType.PLAY ||
@@ -646,7 +669,7 @@ export function useStation(code: string, joinPassword?: string | null) {
 
       if (stationPlaybackMode === 'DIRECT') {
         const directAnchorPosition =
-          directActualPosition ??
+          (!directTransitionActive ? directActualPosition : null) ??
           (typeof playbackState.currentPosition === 'number' && Number.isFinite(playbackState.currentPosition)
             ? Math.max(0, playbackState.currentPosition)
             : null)
@@ -836,10 +859,16 @@ export function useStation(code: string, joinPassword?: string | null) {
       }
       const pendingDirectActive =
         !!pendingDirectCommandRef.current && Date.now() <= pendingDirectCommandRef.current.expiresAt
+      const directTransitionActive =
+        isDirectPlayback && activeAudioRef.current.isTransportTransitionActive()
       if (pending && !pendingActive) {
         pendingTrackSyncRef.current = null
       }
       if (pendingDirectActive && isDirectPlayback) {
+        localTickAnchorRef.current = Date.now()
+        return
+      }
+      if (directTransitionActive) {
         localTickAnchorRef.current = Date.now()
         return
       }
