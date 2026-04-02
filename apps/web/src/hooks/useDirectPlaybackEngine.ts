@@ -467,13 +467,12 @@ export function useDirectPlaybackEngine({
   )
 
   const beginCommandWait = useCallback(
-    (message = 'Waiting for server confirmation...') => {
+    (_message = 'Waiting for server confirmation...') => {
       playTokenRef.current += 1
       clearResumeSyncGrace()
       clearStallRecovery(true)
-      setConnectionStatus('connecting', message)
     },
-    [clearResumeSyncGrace, clearStallRecovery, setConnectionStatus],
+    [clearResumeSyncGrace, clearStallRecovery],
   )
 
   const loadTrack = useCallback(
@@ -578,7 +577,6 @@ export function useDirectPlaybackEngine({
         return
       }
 
-      setConnectionStatus('buffering', 'Pausing track...')
       fadeVolumeTo(0, VOLUME_FADE_OUT_MS, () => {
         finalizePause(token)
       })
@@ -619,7 +617,6 @@ export function useDirectPlaybackEngine({
         return
       }
 
-      setConnectionStatus('connecting', 'Switching track...')
       fadeVolumeTo(0, VOLUME_FADE_OUT_MS, switchSource)
     },
     [
@@ -664,7 +661,6 @@ export function useDirectPlaybackEngine({
         finishTransportTransition(token)
       }
 
-      setConnectionStatus('buffering', 'Synchronizing playback...')
       fadeVolumeTo(0, SEEK_FADE_OUT_MS, finishSeek)
     },
     [
