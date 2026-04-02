@@ -48,7 +48,7 @@ type PublicGuestStation = {
   listenerCount: number;
   accessMode: "PUBLIC" | "PRIVATE";
   isPasswordProtected: boolean;
-  playbackMode?: "DIRECT" | "BROADCAST";
+  playbackMode?: "DIRECT";
   currentTrackId: string | null;
   currentTrack?: {
     id: string;
@@ -75,10 +75,7 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
 const MAX_MEMBERS_ON_MAP = 10;
 const MAX_ADMINS_PER_STATION = 10;
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
-const DEFAULT_PLAYBACK_MODE =
-  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === "direct"
-    ? "DIRECT"
-    : "BROADCAST";
+const DEFAULT_PLAYBACK_MODE = "DIRECT";
 const STACK_LAYOUT_TRANSITION = {
   type: "spring" as const,
   stiffness: 125,
@@ -355,7 +352,6 @@ export default function StationPage({
     currentMember?.permissions?.includes(Permission.PLAYBACK_CONTROL) ?? false;
   const canControl = isOwner || isAdmin || hasPlaybackPermission;
   const canManageMembers = isOwner || isAdmin;
-  const isBroadcastMode = station?.playbackMode === "BROADCAST";
 
   const normalizedMemberSearch = useMemo(
     () => memberSearch.trim().toLowerCase(),
@@ -1036,7 +1032,7 @@ export default function StationPage({
                 isPasswordProtected: station?.isPasswordProtected ?? false,
                 crossfadeDuration: station?.crossfadeDuration ?? 3,
                 streamQuality: station?.streamQuality ?? "HIGH",
-                playbackMode: station?.playbackMode ?? "DIRECT",
+                playbackMode: "DIRECT",
               }}
               onBack={() => setContentMode("station")}
               onSaved={(patch) => {
@@ -1091,9 +1087,9 @@ export default function StationPage({
                   onRestartAudio={restartAudio}
                   onSkip={handleSkip}
                   onPrev={handlePrev}
-                  onSeek={isBroadcastMode ? () => {} : handleSeek}
-                  progressInteractive={!isBroadcastMode}
-                  transportControlsEnabled={!isBroadcastMode}
+                  onSeek={handleSeek}
+                  progressInteractive
+                  transportControlsEnabled
                   onToggleLoop={handleToggleLoop}
                   onToggleShuffle={handleToggleShuffle}
                 />

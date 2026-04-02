@@ -17,7 +17,7 @@ import api from "@/lib/api";
 
 type AccessMode = "PUBLIC" | "PRIVATE";
 type StreamQuality = "LOW" | "MEDIUM" | "HIGH";
-type PlaybackMode = "DIRECT" | "BROADCAST";
+type PlaybackMode = "DIRECT";
 
 interface StationSettingsInfo {
   id: string;
@@ -118,20 +118,7 @@ const PLAYBACK_MODE_OPTIONS: Array<{
       </svg>
     ),
   },
-  {
-    value: "BROADCAST",
-    label: "Broadcast",
-    hint: "Icecast stream · radio mode",
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2zM4.93 4.93a4.5 4.5 0 0 0 0 6.36l1.06-1.06a3 3 0 0 1 0-4.24L4.93 4.93zm6.14 0-1.06 1.06a3 3 0 0 1 0 4.24l1.06 1.06a4.5 4.5 0 0 0 0-6.36zM3.05 3.05a7 7 0 0 0 0 9.9l1.06-1.06a5.5 5.5 0 0 1 0-7.78L3.05 3.05zm9.9 0-1.06 1.06a5.5 5.5 0 0 1 0 7.78l1.06 1.06a7 7 0 0 0 0-9.9z" />
-      </svg>
-    ),
-  },
 ];
-
-const DEPLOYMENT_MODE =
-  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() ?? "hybrid";
 
 export function SettingsPanel({
   station,
@@ -165,7 +152,6 @@ export function SettingsPanel({
   const [deleting, setDeleting] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [error, setError] = useState("");
-  const isDirectOnlyDeployment = DEPLOYMENT_MODE === "direct";
 
   useEffect(() => {
     setName(station.name);
@@ -191,11 +177,8 @@ export function SettingsPanel({
 
   const hasPasswordAlready = !!station.isPasswordProtected;
   const playbackModeOptions = useMemo(
-    () =>
-      isDirectOnlyDeployment
-        ? PLAYBACK_MODE_OPTIONS.filter((opt) => opt.value === "DIRECT")
-        : PLAYBACK_MODE_OPTIONS,
-    [isDirectOnlyDeployment],
+    () => PLAYBACK_MODE_OPTIONS,
+    [],
   );
 
   const canSave = useMemo(() => {
@@ -502,9 +485,7 @@ export function SettingsPanel({
               </p>
             </div>
             <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
-              {isDirectOnlyDeployment
-                ? "This deployment runs in direct-only mode. Tracks stream over HTTP with seek support."
-                : "Direct mode streams tracks over HTTP with seek support. Broadcast mode uses Icecast for unlimited concurrent listeners without seek."}
+              Tracks stream over HTTP with local playback, seek support, and event-based sync.
             </p>
             <div className="flex flex-wrap gap-2 items-stretch">
               {playbackModeOptions.map((opt) => (

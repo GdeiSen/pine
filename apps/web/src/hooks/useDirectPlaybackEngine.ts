@@ -18,7 +18,7 @@ const TRACK_END_SEEK_GUARD_S = 0.4
 const STALL_RECOVERY_DELAY_MS = 5_500
 const TRACK_OPEN_RECOVERY_GRACE_MS = 12_000
 const STALL_RECOVERY_MAX_RETRIES = 2
-const VOLUME_FADE_IN_MS = 1200
+const VOLUME_FADE_IN_MS = 1600
 const VOLUME_FADE_OUT_MS = 380
 const PREFETCH_CLEANUP_DELAY_MS = 1_000
 
@@ -115,6 +115,8 @@ export function useDirectPlaybackEngine({
   const targetVolumeRef = useRef(clampVolume(volume))
   const isPausedRef = useRef(isPaused)
   const trackDurationRef = useRef(trackDuration)
+  const currentPositionRef = useRef(currentPosition)
+  const trackStartedAtRef = useRef(trackStartedAt)
   const stallRecoveryTimerRef = useRef<number | null>(null)
   const stallRecoveryAttemptsRef = useRef(0)
   const sourcePlaybackStartedRef = useRef(false)
@@ -225,16 +227,22 @@ export function useDirectPlaybackEngine({
   }, [fadeVolumeTo])
 
   const getTargetPosition = useCallback((): number => {
-    if (typeof currentPosition === 'number' && Number.isFinite(currentPosition)) {
-      if (trackDuration > 0) return Math.min(Math.max(0, currentPosition), trackDuration)
-      return Math.max(0, currentPosition)
+    const liveCurrentPosition = currentPositionRef.current
+    const liveTrackStartedAt = trackStartedAtRef.current
+    const liveTrackDuration = trackDurationRef.current
+
+    if (typeof liveCurrentPosition === 'number' && Number.isFinite(liveCurrentPosition)) {
+      if (liveTrackDuration > 0) {
+        return Math.min(Math.max(0, liveCurrentPosition), liveTrackDuration)
+      }
+      return Math.max(0, liveCurrentPosition)
     }
 
-    if (!trackStartedAt) return -1
-    const pos = (Date.now() - trackStartedAt) / 1000
-    if (trackDuration > 0) return Math.min(Math.max(0, pos), trackDuration)
+    if (!liveTrackStartedAt) return -1
+    const pos = (Date.now() - liveTrackStartedAt) / 1000
+    if (liveTrackDuration > 0) return Math.min(Math.max(0, pos), liveTrackDuration)
     return Math.max(0, pos)
-  }, [currentPosition, trackDuration, trackStartedAt])
+  }, [])
 
   const getExpectedPosition = useCallback((): number => {
     return getTargetPosition()
@@ -247,7 +255,9 @@ export function useDirectPlaybackEngine({
   useEffect(() => {
     isPausedRef.current = isPaused
     trackDurationRef.current = trackDuration
-  }, [isPaused, trackDuration])
+    currentPositionRef.current = currentPosition
+    trackStartedAtRef.current = trackStartedAt
+  }, [currentPosition, isPaused, trackDuration, trackStartedAt])
 
   const clearStallRecovery = useCallback((resetAttempts = false) => {
     if (stallRecoveryTimerRef.current !== null) {
@@ -427,6 +437,7 @@ export function useDirectPlaybackEngine({
       if (sourceChanged) {
         setMediaDuration(null)
         sourceUrlRef.current = url
+        audio.volume = 0
         audio.src = url
         audio.preload = 'auto'
         audio.load()
@@ -883,6 +894,8 @@ export function useDirectPlaybackEngine({
     driftTimerRef.current = window.setInterval(() => {
       const audio = audioRef.current
       if (!audio || audio.paused || audio.readyState < 3) return
+      if (!sourcePlaybackStartedRef.current) return
+      if (connectionStateRef.current !== 'playing') return
       const expected = getExpectedPosition()
       if (expected < 0) return
       const actual = audio.currentTime
@@ -906,8 +919,7 @@ export function useDirectPlaybackEngine({
         driftTimerRef.current = null
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackId, isPaused, trackStartedAt])
+  }, [getExpectedPosition, isPaused, trackId])
 
   const restartAudio = useCallback(() => {
     if (!trackId) return

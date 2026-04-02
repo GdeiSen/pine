@@ -19,9 +19,8 @@ const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
 const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
 const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
-const DIRECT_ONLY_DEPLOYMENT =
-  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
-const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
+const DIRECT_ONLY_DEPLOYMENT = true
+const DEFAULT_PLAYBACK_MODE = 'DIRECT'
 
 function normalizeLoopMode(value: unknown): 'none' | 'track' | 'queue' {
   if (value === 'track' || value === 'TRACK') return 'track'

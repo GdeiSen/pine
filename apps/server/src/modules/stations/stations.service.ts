@@ -920,19 +920,14 @@ export class StationsService {
   }
 
   private resolvePlaybackMode(playbackMode?: StationPlaybackMode | string | null) {
-    if (this.isDirectOnlyDeployment()) {
-      return StationPlaybackMode.DIRECT
-    }
-
-    return playbackMode === StationPlaybackMode.BROADCAST
-      ? StationPlaybackMode.BROADCAST
-      : StationPlaybackMode.DIRECT
+    void playbackMode
+    return StationPlaybackMode.DIRECT
   }
 
   private assertPlaybackModeAllowed(playbackMode?: StationPlaybackMode | null) {
     if (!playbackMode) return
-    if (this.isDirectOnlyDeployment() && playbackMode === StationPlaybackMode.BROADCAST) {
-      throw new BadRequestException('Broadcast mode is disabled in this deployment')
+    if (playbackMode === StationPlaybackMode.BROADCAST) {
+      throw new BadRequestException('Broadcast mode is no longer supported')
     }
   }
 

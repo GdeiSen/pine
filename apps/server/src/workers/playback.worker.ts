@@ -1027,15 +1027,8 @@ async function buildLiquidsoapSnapshot(stationId: string) {
 }
 
 async function isBroadcastStation(stationId: string): Promise<boolean> {
-  if (isDirectOnlyDeployment()) {
-    return false
-  }
-
-  const station = await prisma.station.findUnique({
-    where: { id: stationId },
-    select: { playbackMode: true },
-  })
-  return station?.playbackMode === 'BROADCAST'
+  void stationId
+  return false
 }
 
 async function syncLiquidsoapStation(stationId: string, action?: LiquidsoapAction) {

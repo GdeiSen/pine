@@ -15,9 +15,8 @@ import {
   useRadioPlaybackEngine,
 } from '@/hooks/useRadioPlaybackEngine'
 
-const DIRECT_ONLY_DEPLOYMENT =
-  process.env.NEXT_PUBLIC_APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
-const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
+const DIRECT_ONLY_DEPLOYMENT = true
+const DEFAULT_PLAYBACK_MODE = 'DIRECT'
 const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
 
 function normalizePlaybackVersion(value: unknown): number | null {

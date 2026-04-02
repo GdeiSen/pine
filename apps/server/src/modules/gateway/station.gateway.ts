@@ -410,13 +410,8 @@ export class StationGateway
   }
 
   private resolvePlaybackMode(playbackMode?: string | null) {
-    if (this.isDirectOnlyDeployment()) {
-      return StationPlaybackMode.DIRECT
-    }
-
-    return playbackMode === StationPlaybackMode.BROADCAST
-      ? StationPlaybackMode.BROADCAST
-      : StationPlaybackMode.DIRECT
+    void playbackMode
+    return StationPlaybackMode.DIRECT
   }
 
   private isDirectOnlyDeployment() {
