@@ -4,6 +4,10 @@ UPDATE "stations"
 SET "playbackMode" = 'DIRECT'
 WHERE "playbackMode"::text <> 'DIRECT';
 
+-- Drop default before enum cast to avoid PostgreSQL default cast failure.
+ALTER TABLE "stations"
+ALTER COLUMN "playbackMode" DROP DEFAULT;
+
 ALTER TYPE "station_playback_mode" RENAME TO "station_playback_mode_old";
 
 CREATE TYPE "station_playback_mode" AS ENUM ('DIRECT');
@@ -13,3 +17,6 @@ ALTER COLUMN "playbackMode" TYPE "station_playback_mode"
 USING ("playbackMode"::text::"station_playback_mode");
 
 DROP TYPE "station_playback_mode_old";
+
+ALTER TABLE "stations"
+ALTER COLUMN "playbackMode" SET DEFAULT 'DIRECT'::"station_playback_mode";
