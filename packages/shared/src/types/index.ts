@@ -173,6 +173,7 @@ export interface Station {
   crossfadeDuration: number
   streamQuality: StreamQuality
   playbackMode: StationPlaybackMode
+  playbackVersion?: number
   activePlaylistId: string | null
   listenerCount: number
   createdAt: string
@@ -252,6 +253,7 @@ export interface StationState {
   currentPosition: number
   isPaused: boolean
   trackStartedAt: number | null
+  version?: number
   queue: QueueItem[]
   members: StationMember[]
   activePlaylist: Playlist | null
@@ -266,6 +268,7 @@ export interface WsStationJoin {
 }
 
 export interface WsPlaybackSync {
+  version?: number
   currentTrackId: string | null
   position: number
   isPaused: boolean

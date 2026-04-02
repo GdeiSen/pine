@@ -292,7 +292,13 @@ export class TracksService {
     return this.formatTrack(updated)
   }
 
-  async streamTrack(trackId: string, res: any, rangeHeader: string | undefined, userId?: string) {
+  async streamTrack(
+    trackId: string,
+    res: any,
+    rangeHeader: string | undefined,
+    userId?: string,
+    ifNoneMatch?: string,
+  ) {
     const track = await this.prisma.track.findUnique({
       where: { id: trackId },
       include: {
@@ -311,15 +317,28 @@ export class TracksService {
     const mimeType = track.assets[0]?.mimeType ?? 'audio/mpeg'
     const stat = await this.storageService.getObjectStat('tracks', objectKey).catch(() => null)
     const totalSize = stat?.size ?? track.fileSize ?? 0
+    const etag = `"track-${track.id}-${track.updatedAt.getTime()}-${totalSize}"`
+    const cacheControl = 'private, max-age=86400, stale-while-revalidate=604800'
 
     const byteRange = parseSingleByteRange(rangeHeader, totalSize)
     if (byteRange.kind === 'unsatisfiable') {
       res.set({
         'Content-Range': `bytes */${totalSize}`,
         'Accept-Ranges': 'bytes',
-        'Cache-Control': 'no-store',
+        'Cache-Control': cacheControl,
+        ETag: etag,
       })
       res.status(416).end()
+      return
+    }
+
+    if (byteRange.kind === 'none' && ifNoneMatch?.trim() === etag) {
+      res.set({
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': cacheControl,
+        ETag: etag,
+      })
+      res.status(304).end()
       return
     }
 
@@ -329,7 +348,8 @@ export class TracksService {
         'Accept-Ranges': 'bytes',
         'Content-Length': byteRange.length,
         'Content-Type': mimeType,
-        'Cache-Control': 'no-store',
+        'Cache-Control': cacheControl,
+        ETag: etag,
       })
       res.status(206)
 
@@ -352,7 +372,8 @@ export class TracksService {
       'Content-Type': mimeType,
       'Accept-Ranges': 'bytes',
       ...(totalSize > 0 ? { 'Content-Length': totalSize } : {}),
-      'Cache-Control': 'no-store',
+      'Cache-Control': cacheControl,
+      ETag: etag,
     })
     res.status(200)
 

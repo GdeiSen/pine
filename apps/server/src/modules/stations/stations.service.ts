@@ -240,6 +240,7 @@ export class StationsService {
       streamUrl,
       mountPath,
       playbackMode,
+      playbackVersion: playback.version,
       serverTime: new Date().toISOString(),
       qualityHint: station.streamQuality,
       latencyHintMs: this.estimateLatencyHintMs(station.streamQuality),
@@ -758,6 +759,7 @@ export class StationsService {
       isPaused: boolean
       trackStartedAt: Date | null
       pausedPosition: number
+      version?: number
     } | null,
   ) {
     const playbackState = playback ?? {
@@ -766,6 +768,7 @@ export class StationsService {
       isPaused: true,
       trackStartedAt: null,
       pausedPosition: 0,
+      version: 0,
     }
 
     const accessMode = this.normalizeAccessMode(station.accessMode)
@@ -798,10 +801,11 @@ export class StationsService {
             uploadedBy: currentTrack.uploadedBy,
           }
         : null,
-      currentPosition: playbackState.currentPosition,
+      currentPosition: this.getPlaybackPosition(playbackState),
       isPaused: playbackState.isPaused,
       trackStartedAt: playbackState.trackStartedAt,
       pausedPosition: playbackState.pausedPosition,
+      playbackVersion: playbackState.version ?? 0,
       crossfadeDuration: station.crossfadeDuration,
       streamQuality: station.streamQuality,
       playbackMode: this.resolvePlaybackMode(
@@ -825,6 +829,7 @@ export class StationsService {
         isPaused: boolean
         trackStartedAt: Date | null
         pausedPosition: number
+        version: number
       }
     >()
 
@@ -1043,5 +1048,19 @@ export class StationsService {
       default:
         return 1800
     }
+  }
+
+  private getPlaybackPosition(playback: {
+    isPaused: boolean
+    pausedPosition: number
+    currentPosition: number
+    trackStartedAt: Date | null
+  }) {
+    const position =
+      playback.isPaused || !playback.trackStartedAt
+        ? playback.pausedPosition || playback.currentPosition || 0
+        : (Date.now() - playback.trackStartedAt.getTime()) / 1000
+
+    return Math.max(0, position)
   }
 }

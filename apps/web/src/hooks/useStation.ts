@@ -29,6 +29,16 @@ function normalizeLoopMode(value: unknown): 'none' | 'track' | 'queue' {
   return 'none'
 }
 
+function normalizePlaybackVersion(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null
+}
+
+function isStalePlaybackVersion(currentVersion: number, incomingVersion: number | null) {
+  return incomingVersion !== null && currentVersion > 0 && incomingVersion < currentVersion
+}
+
 export function useStation(code: string, joinPassword?: string | null) {
   const store = useStationStore()
   const {
@@ -67,6 +77,7 @@ export function useStation(code: string, joinPassword?: string | null) {
 
   const playbackMode = store.station?.playbackMode ?? DEFAULT_PLAYBACK_MODE
   const isDirectMode = playbackMode === 'DIRECT'
+  const directPrefetchTrackId = isDirectMode ? (store.queue[0]?.track.id ?? null) : null
 
   const broadcastEngine = useRadioPlaybackEngine({
     streamUrl: isDirectMode ? null : store.stationStreamUrl,
@@ -76,6 +87,7 @@ export function useStation(code: string, joinPassword?: string | null) {
 
   const directEngine = useDirectPlaybackEngine({
     trackId: isDirectMode ? (store.playback.currentTrack?.id ?? null) : null,
+    prefetchTrackId: directPrefetchTrackId,
     trackStartedAt: isDirectMode ? store.playback.trackStartedAt : null,
     currentPosition: store.playback.currentPosition,
     isPaused: store.playback.isPaused,
@@ -271,6 +283,8 @@ export function useStation(code: string, joinPassword?: string | null) {
           currentPosition?: number
           isPaused?: boolean
           trackStartedAt?: string | number | null
+          version?: number
+          playbackVersion?: number
           station?: unknown
         }
 
@@ -280,6 +294,10 @@ export function useStation(code: string, joinPassword?: string | null) {
           setStationStreamUrl(null)
         }
         setPlayback({
+          version:
+            normalizePlaybackVersion(snapshot.version) ??
+            normalizePlaybackVersion(snapshot.playbackVersion) ??
+            useStationStore.getState().playback.version,
           currentTrack: snapshot.currentTrack as any ?? null,
           currentQueueType: snapshot.currentQueueType ?? null,
           trackStartedAt: normalizeTrackStartedAt(snapshot.trackStartedAt),
@@ -321,6 +339,13 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     const handleStationState = (state: any) => {
       window.clearTimeout(initialSyncTimeout)
+      const currentVersion = useStationStore.getState().playback.version
+      const incomingVersion = normalizePlaybackVersion(state.version)
+      if (isStalePlaybackVersion(currentVersion, incomingVersion)) {
+        setConnecting(false)
+        setConnected(true)
+        return
+      }
       const startedAt = normalizeTrackStartedAt(state.trackStartedAt)
       const nextTrackId = state.currentTrack?.id ?? null
       const nextIsPaused = state.isPaused ?? false
@@ -345,6 +370,7 @@ export function useStation(code: string, joinPassword?: string | null) {
         setStationStreamUrl(null)
       }
       setPlayback({
+        ...(incomingVersion !== null ? { version: incomingVersion } : {}),
         currentTrack: state.currentTrack ?? null,
         currentQueueType: state.currentQueueType ?? null,
         isPaused: nextIsPaused,
@@ -382,6 +408,11 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     const handleTrackChanged = (data: any) => {
       const activeAudio = activeAudioRef.current
+      const currentVersion = useStationStore.getState().playback.version
+      const incomingVersion = normalizePlaybackVersion(data.version)
+      if (isStalePlaybackVersion(currentVersion, incomingVersion)) {
+        return
+      }
       const stationPlaybackMode = useStationStore.getState().station?.playbackMode
       const previousTrackId = useStationStore.getState().playback.currentTrack?.id ?? null
       const nextTrack = data.track ?? null
@@ -415,6 +446,7 @@ export function useStation(code: string, joinPassword?: string | null) {
       })
 
       setPlayback({
+        ...(incomingVersion !== null ? { version: incomingVersion } : {}),
         currentTrack: nextTrack,
         currentQueueType: data.currentQueueType ?? null,
         trackStartedAt: startedAt,
@@ -465,6 +497,10 @@ export function useStation(code: string, joinPassword?: string | null) {
       const state = useStationStore.getState()
       const stationPlaybackMode = state.station?.playbackMode
       const playbackState = state.playback
+      const incomingVersion = normalizePlaybackVersion(data.version)
+      if (isStalePlaybackVersion(playbackState.version, incomingVersion)) {
+        return
+      }
       const currentTrackId = playbackState.currentTrack?.id
       const commandType =
         typeof data.commandType === 'string' ? data.commandType : null
@@ -475,9 +511,7 @@ export function useStation(code: string, joinPassword?: string | null) {
         stationPlaybackMode === 'DIRECT' &&
         syncEventType === PlaybackEventType.COMMAND_RECEIVED &&
         commandType &&
-        (commandType === PlaybackCommandType.PLAY ||
-          commandType === PlaybackCommandType.PAUSE ||
-          commandType === PlaybackCommandType.SKIP ||
+        (commandType === PlaybackCommandType.SKIP ||
           commandType === PlaybackCommandType.PREVIOUS)
       ) {
         beginDirectCommandWait(commandType, currentTrackId ?? null)
@@ -658,6 +692,7 @@ export function useStation(code: string, joinPassword?: string | null) {
               : 'ws-sync'
 
       setPlayback({
+        ...(incomingVersion !== null ? { version: incomingVersion } : {}),
         currentPosition: resolvedPosition,
         isPaused: resolvedIsPaused,
         isPlaying: !!playbackState.currentTrack && !resolvedIsPaused,
@@ -775,6 +810,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     const timeSync = setInterval(requestTimeSync, TIME_SYNC_INTERVAL_MS)
     const streamInfoRefresh = setInterval(() => {
       if (cancelled) return
+      if (useStationStore.getState().station?.playbackMode === 'DIRECT') return
       void refreshStreamInfo()
     }, 10_000)
 
@@ -927,9 +963,7 @@ export function useStation(code: string, joinPassword?: string | null) {
         directAudio && Number.isFinite(directAudio.currentTime) ? Math.max(0, directAudio.currentTime) : null
       const strictDirectCommand =
         isDirectPlayback &&
-        (command.type === PlaybackCommandType.PLAY ||
-          command.type === PlaybackCommandType.PAUSE ||
-          command.type === PlaybackCommandType.SKIP ||
+        (command.type === PlaybackCommandType.SKIP ||
           command.type === PlaybackCommandType.PREVIOUS)
 
       if (strictDirectCommand) {

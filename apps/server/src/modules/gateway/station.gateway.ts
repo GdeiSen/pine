@@ -299,6 +299,7 @@ export class StationGateway
     }
 
     return {
+      serverTime: new Date().toISOString(),
       station: {
         id: station.id,
         code: station.code,
@@ -322,6 +323,7 @@ export class StationGateway
         listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
       },
       currentTrack: this.toClientTrack(currentTrack),
+      version: playback.version,
       currentPosition: this.getPlaybackPosition(playback),
       isPaused: playback.isPaused,
       trackStartedAt: playback.trackStartedAt ? playback.trackStartedAt.getTime() : null,

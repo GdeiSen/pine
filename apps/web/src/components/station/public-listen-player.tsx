@@ -20,6 +20,16 @@ const DIRECT_ONLY_DEPLOYMENT =
 const DEFAULT_PLAYBACK_MODE = DIRECT_ONLY_DEPLOYMENT ? 'DIRECT' : 'BROADCAST'
 const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
 
+function normalizePlaybackVersion(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null
+}
+
+function isStalePlaybackVersion(currentVersion: number, incomingVersion: number | null) {
+  return incomingVersion !== null && currentVersion > 0 && incomingVersion < currentVersion
+}
+
 interface PublicListenState {
   code: string
   name: string
@@ -43,6 +53,7 @@ interface PublicListenState {
   isPaused?: boolean
   trackStartedAt?: string | null
   pausedPosition?: number
+  playbackVersion?: number
   serverTime?: string | null
   streamUrl?: string | null
 }
@@ -88,7 +99,6 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
   const stateRef = useRef(state)
   const playbackRef = useRef(playback)
   const isDirectModeRef = useRef(isDirectMode)
-  const autoRestartTrackIdRef = useRef<string | null>(null)
   const pendingDirectCommandRef = useRef<{
     type: PlaybackCommandType
     trackIdBefore: string | null
@@ -203,50 +213,6 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     }
   }, [setAudioConnection])
 
-  // Guest fail-safe: if current track is known but playback is still not started,
-  // trigger a single restart per track instead of waiting for TRACK_CHANGED.
-  useEffect(() => {
-    const currentTrackId = state.currentTrackId
-    const isTrackPaused = !!state.isPaused
-    const pendingDirectCommand = pendingDirectCommandRef.current
-    const pendingDirectActive =
-      !!pendingDirectCommand && Date.now() <= pendingDirectCommand.expiresAt
-
-    if (!currentTrackId || isTrackPaused) {
-      autoRestartTrackIdRef.current = null
-      return
-    }
-
-    if (pendingDirectActive) {
-      return
-    }
-
-    if (playback.audioConnectionState === 'playing') {
-      autoRestartTrackIdRef.current = null
-      return
-    }
-
-    if (autoRestartTrackIdRef.current === currentTrackId) {
-      return
-    }
-
-    const timer = window.setTimeout(() => {
-      const latestState = stateRef.current
-      const latestTrackId = latestState.currentTrackId
-      const latestPendingCommand = pendingDirectCommandRef.current
-      const latestPendingActive =
-        !!latestPendingCommand && Date.now() <= latestPendingCommand.expiresAt
-      if (!latestTrackId || latestTrackId !== currentTrackId || latestState.isPaused) return
-      if (latestPendingActive) return
-      if (playbackRef.current.audioConnectionState === 'playing') return
-
-      autoRestartTrackIdRef.current = currentTrackId
-      void playbackRef.current.restartAudio()
-    }, 1300)
-
-    return () => window.clearTimeout(timer)
-  }, [playback.audioConnectionState, state.currentTrackId, state.isPaused])
-
   // Tick position forward locally
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -335,6 +301,11 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
     const handleStationState = (data: any) => {
       if (cancelled) return
+      const currentVersion = stateRef.current.playbackVersion ?? 0
+      const incomingVersion = normalizePlaybackVersion(data.version)
+      if (isStalePlaybackVersion(currentVersion, incomingVersion)) {
+        return
+      }
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
       const offsetMs = getServerOffsetMs(data.station?.serverTime ?? data.serverTime, Date.now())
       if (offsetMs !== null) serverOffsetMsRef.current = offsetMs
@@ -365,6 +336,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         name: data.station?.name ?? prev.name,
         listenerCount: data.station?.listenerCount ?? prev.listenerCount,
         playbackMode: nextPlaybackMode,
+        ...(incomingVersion !== null ? { playbackVersion: incomingVersion } : {}),
         currentTrackId: data.currentTrack?.id ?? null,
         currentTrack: data.currentTrack ?? null,
         currentPosition: position,
@@ -391,6 +363,11 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
     const handleTrackChanged = (data: any) => {
       if (cancelled) return
+      const currentVersion = stateRef.current.playbackVersion ?? 0
+      const incomingVersion = normalizePlaybackVersion(data.version)
+      if (isStalePlaybackVersion(currentVersion, incomingVersion)) {
+        return
+      }
       const startedAt = normalizeTrackStartedAt(data.trackStartedAt)
       const nextPlaybackMode = stateRef.current.playbackMode ?? DEFAULT_PLAYBACK_MODE
       const nextIsDirectMode = nextPlaybackMode === 'DIRECT'
@@ -428,6 +405,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
       setState((prev) => ({
         ...prev,
+        ...(incomingVersion !== null ? { playbackVersion: incomingVersion } : {}),
         currentTrackId: data.track?.id ?? null,
         currentTrack: data.track ?? null,
         currentPosition: position,
@@ -463,6 +441,10 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
     const handlePlaybackSync = (data: any) => {
       if (cancelled) return
       const currentState = stateRef.current
+      const incomingVersion = normalizePlaybackVersion(data.version)
+      if (isStalePlaybackVersion(currentState.playbackVersion ?? 0, incomingVersion)) {
+        return
+      }
       const commandType = typeof data.commandType === 'string' ? data.commandType : null
       const syncEventType = typeof data.type === 'string' ? data.type : null
       const nextIsDirectMode = (currentState.playbackMode ?? DEFAULT_PLAYBACK_MODE) === 'DIRECT'
@@ -471,9 +453,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
         nextIsDirectMode &&
         syncEventType === PlaybackEventType.COMMAND_RECEIVED &&
         commandType &&
-        (commandType === PlaybackCommandType.PLAY ||
-          commandType === PlaybackCommandType.PAUSE ||
-          commandType === PlaybackCommandType.SKIP ||
+        (commandType === PlaybackCommandType.SKIP ||
           commandType === PlaybackCommandType.PREVIOUS)
       ) {
         beginDirectCommandWait(commandType, currentState.currentTrackId ?? null)
@@ -537,6 +517,7 @@ export function PublicListenPlayer({ code, initialState }: { code: string; initi
 
       setState((prev) => ({
         ...prev,
+        ...(incomingVersion !== null ? { playbackVersion: incomingVersion } : {}),
         currentPosition: position,
         isPaused: nextIsPaused,
         trackStartedAt: nextTrackStartedAt,

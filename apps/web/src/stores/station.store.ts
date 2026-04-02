@@ -54,6 +54,7 @@ interface StationInfo {
 }
 
 interface PlaybackState {
+  version: number
   currentTrack: CurrentTrack | null
   currentQueueType: 'USER' | 'SYSTEM' | null
   currentPosition: number
@@ -97,6 +98,7 @@ interface StationState {
 }
 
 const initialPlayback: PlaybackState = {
+  version: 0,
   currentTrack: null,
   currentQueueType: null,
   currentPosition: 0,

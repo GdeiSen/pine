@@ -97,9 +97,10 @@ export class TracksController {
     @Param('id', new ParseUUIDPipe()) id: string,
     @CurrentUser() user: { id: string } | null,
     @Headers('range') rangeHeader: string | undefined,
+    @Headers('if-none-match') ifNoneMatch: string | undefined,
     @Res() res: Response,
   ) {
-    return this.tracksService.streamTrack(id, res, rangeHeader, user?.id)
+    return this.tracksService.streamTrack(id, res, rangeHeader, user?.id, ifNoneMatch)
   }
 
   @Get('tracks/:id/cover')

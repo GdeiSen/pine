@@ -8,6 +8,7 @@ export interface StationStreamInfo {
   streamUrl: string
   mountPath: string
   playbackMode?: 'DIRECT' | 'BROADCAST'
+  playbackVersion?: number
   serverTime: string
   qualityHint: 'LOW' | 'MEDIUM' | 'HIGH'
   latencyHintMs: number

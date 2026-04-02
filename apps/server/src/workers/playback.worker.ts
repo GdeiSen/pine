@@ -1102,6 +1102,7 @@ async function markTrackPlaybackTransition(
         stationId,
         type: PlaybackEventType.TRACK_CHANGED,
         payload: {
+          version: repeatedState.version,
           autoAdvance: true,
           currentTrackId: repeatedState.currentTrackId,
           currentQueueItemId: repeatedState.currentQueueItemId,
@@ -1161,6 +1162,7 @@ async function markTrackPlaybackTransition(
         stationId,
         type: PlaybackEventType.TRACK_CHANGED,
         payload: {
+          version: nextState.version,
           autoAdvance: true,
           currentTrackId: nextState.currentTrackId,
           currentQueueItemId: nextState.currentQueueItemId,
@@ -1198,6 +1200,7 @@ async function markTrackPlaybackTransition(
       stationId,
       type: PlaybackEventType.STATE_CHANGED,
       payload: {
+        version: nextState.version,
         autoAdvance: true,
         currentTrackId: null,
         currentQueueItemId: null,
