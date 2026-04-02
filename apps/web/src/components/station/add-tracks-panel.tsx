@@ -44,7 +44,7 @@ import { formatDuration, formatFileSize } from "@/lib/utils";
 import api from "@/lib/api";
 import { buildTrackCoverUrl } from "@/lib/media-url";
 import { useAuthStore } from "@/stores/auth.store";
-import { SUPPORTED_EXTENSIONS } from "@web-radio/shared";
+import { MAX_FILE_SIZE_BYTES, SUPPORTED_EXTENSIONS } from "@web-radio/shared";
 
 type FolderColorKey = "orange" | "blue" | "green" | "violet" | "rose" | "amber";
 
@@ -273,6 +273,8 @@ interface UploadFile {
   status: "pending" | "uploading" | "done" | "error";
   error?: string;
   progress: number;
+  uploadedTrackId?: string | null;
+  uploadedCoverUrl?: string | null;
 }
 
 interface AddTracksPanelProps {
@@ -695,6 +697,14 @@ export function AddTracksPanel({
     y: 0,
     inside: false,
   });
+  const supportedUploadFormatsText = useMemo(
+    () => SUPPORTED_EXTENSIONS.map((ext) => ext.replace(".", "").toUpperCase()).join(", "),
+    [],
+  );
+  const maxUploadFileSizeText = useMemo(
+    () => formatFileSize(MAX_FILE_SIZE_BYTES),
+    [],
+  );
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -1109,6 +1119,8 @@ export function AddTracksPanel({
         file,
         status: "pending" as const,
         progress: 0,
+        uploadedTrackId: null,
+        uploadedCoverUrl: null,
       })),
     ]);
   };
@@ -1142,11 +1154,24 @@ export function AddTracksPanel({
           },
         },
       );
+      const uploadedTrack = uploadResponse?.data as
+        | { id: string; hasCover: boolean }
+        | undefined;
+      const uploadedCoverUrl =
+        uploadedTrack?.hasCover && uploadedTrack.id
+          ? buildTrackCoverUrl(uploadedTrack.id)
+          : null;
 
       setUploadFiles((prev) =>
         prev.map((f) =>
           f.id === item.id
-            ? { ...f, status: "done" as const, progress: 100 }
+            ? {
+                ...f,
+                status: "done" as const,
+                progress: 100,
+                uploadedTrackId: uploadedTrack?.id ?? null,
+                uploadedCoverUrl,
+              }
             : f,
         ),
       );
@@ -1493,7 +1518,7 @@ export function AddTracksPanel({
           <motion.section
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            className="max-w-5xl mx-auto min-h-full flex flex-col justify-center w-full"
+            className="w-full min-h-full flex flex-col"
           >
             <input
               ref={uploadInputRef}
@@ -1510,8 +1535,8 @@ export function AddTracksPanel({
                   Publish tracks
                 </p>
                 <p className="mt-2 text-sm text-[--text-secondary] max-w-xl mx-auto">
-                  Covers from the current folder are shown as floating cards.
-                  Hover to make them drift like leaves on water.
+                  Supported formats: {supportedUploadFormatsText}. Max size:{" "}
+                  {maxUploadFileSizeText} per file.
                 </p>
 
                 <div
@@ -1601,66 +1626,102 @@ export function AddTracksPanel({
             </div>
 
             {uploadFiles.length > 0 && (
-              <div className="mt-5 space-y-2">
-                {uploadFiles.map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center gap-3 bg-[--bg-elevated] rounded-xl px-3 py-2.5"
-                  >
-                    <Music2
-                      size={14}
-                      className="text-[--text-muted] flex-shrink-0"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-[--text-primary] truncate">
-                        {item.file.name}
-                      </p>
-                      <p className="text-[10px] text-[--text-muted] mt-0.5">
-                        {formatFileSize(item.file.size)}
-                      </p>
-                      {item.status === "uploading" && (
-                        <div className="mt-1 h-1 rounded-full bg-[--border] overflow-hidden">
-                          <motion.div
-                            className="h-full rounded-full bg-[--color-accent]"
-                            style={{ width: `${item.progress}%` }}
-                            transition={{ duration: 0.2 }}
+              <div className="mt-6 w-full">
+                <div className="mb-1.5 px-1 flex items-center justify-between">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[--text-muted]">
+                    Upload queue
+                  </p>
+                  <p className="text-[10px] text-[--text-muted]">
+                    {uploadFiles.length} file{uploadFiles.length !== 1 ? "s" : ""}
+                  </p>
+                </div>
+
+                <div className="relative space-y-1.5">
+                  {uploadFiles.map((item) => {
+                    const uploadStatusLabel =
+                      item.status === "pending"
+                        ? "Queued"
+                        : item.status === "uploading"
+                          ? `Uploading ${item.progress}%`
+                          : item.status === "done"
+                            ? "Uploaded"
+                            : "Upload failed";
+
+                    return (
+                      <div
+                        key={item.id}
+                        className={`relative flex items-center gap-3 p-2.5 rounded-xl transition-colors ${
+                          item.status === "done"
+                            ? "bg-[--color-accent-muted]"
+                            : "hover:bg-[--bg-subtle]"
+                        }`}
+                      >
+                        <div
+                          className={`w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 ${
+                            item.uploadedCoverUrl ? "bg-[--bg-subtle]" : "bg-gray-500/20"
+                          }`}
+                        >
+                          <TrackCoverImage
+                            src={item.uploadedCoverUrl}
+                            fallbackIconSize={14}
+                            fallbackClassName="w-full h-full flex items-center justify-center"
                           />
                         </div>
-                      )}
-                      {item.status === "error" && (
-                        <p className="text-[10px] text-red-400 mt-0.5">
-                          {item.error}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex-shrink-0">
-                      {item.status === "pending" && (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removeUploadFile(item.id);
-                          }}
-                          className="text-[--text-muted] hover:text-[--text-primary]"
-                        >
-                          <X size={12} />
-                        </button>
-                      )}
-                      {item.status === "uploading" && (
-                        <Loader2
-                          size={14}
-                          className="text-[--color-accent] animate-spin"
-                        />
-                      )}
-                      {item.status === "done" && (
-                        <CheckCircle2 size={14} className="text-emerald-500" />
-                      )}
-                      {item.status === "error" && (
-                        <AlertCircle size={14} className="text-red-400" />
-                      )}
-                    </div>
-                  </div>
-                ))}
+
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-[--text-primary] truncate">
+                            {item.file.name}
+                          </p>
+                          <p className="text-xs text-[--text-muted] truncate tabular-nums">
+                            {formatFileSize(item.file.size)} · {uploadStatusLabel}
+                          </p>
+                          {item.status === "uploading" && (
+                            <div className="mt-1 h-1 rounded-full bg-[--border] overflow-hidden">
+                              <motion.div
+                                className="h-full rounded-full bg-[--color-accent]"
+                                style={{ width: `${item.progress}%` }}
+                                transition={{ duration: 0.2 }}
+                              />
+                            </div>
+                          )}
+                          {item.status === "error" && item.error && (
+                            <p className="text-[10px] text-red-400 mt-0.5 truncate">
+                              {item.error}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="w-5 flex-shrink-0 flex items-center justify-center">
+                          {item.status === "pending" && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeUploadFile(item.id);
+                              }}
+                              className="text-[--text-muted] hover:text-[--text-primary]"
+                              title="Remove from queue"
+                            >
+                              <X size={13} />
+                            </button>
+                          )}
+                          {item.status === "uploading" && (
+                            <Loader2
+                              size={14}
+                              className="text-[--color-accent] animate-spin"
+                            />
+                          )}
+                          {item.status === "done" && (
+                            <CheckCircle2 size={15} className="text-emerald-500" />
+                          )}
+                          {item.status === "error" && (
+                            <AlertCircle size={15} className="text-red-400" />
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </motion.section>

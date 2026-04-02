@@ -1,13 +1,14 @@
 'use client'
 
 import { useState, useRef, useCallback } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
-import { X, Upload, CheckCircle2, AlertCircle, Music2, Loader2 } from 'lucide-react'
+import { motion } from 'framer-motion'
+import { X, Upload, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { TrackCoverImage } from '@/components/ui/track-cover-image'
 import api from '@/lib/api'
-import { SUPPORTED_EXTENSIONS } from '@web-radio/shared'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
+import { buildTrackCoverUrl } from '@/lib/media-url'
+import { formatFileSize } from '@/lib/utils'
+import { MAX_FILE_SIZE_BYTES, SUPPORTED_EXTENSIONS } from '@web-radio/shared'
 
 interface UploadFile {
   id: string
@@ -15,6 +16,8 @@ interface UploadFile {
   status: 'pending' | 'uploading' | 'done' | 'error'
   error?: string
   progress: number
+  uploadedTrackId?: string | null
+  uploadedCoverUrl?: string | null
 }
 
 interface UploadModalProps {
@@ -48,7 +51,10 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
   const [files, setFiles] = useState<UploadFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
-  const activeUploads = useRef(0)
+  const supportedUploadFormatsText = SUPPORTED_EXTENSIONS.map((ext) =>
+    ext.replace('.', '').toUpperCase(),
+  ).join(', ')
+  const maxUploadFileSizeText = formatFileSize(MAX_FILE_SIZE_BYTES)
 
   const addFiles = useCallback((raw: FileList | File[]) => {
     const audio = Array.from(raw).filter(isSupportedAudioUploadFile)
@@ -59,6 +65,8 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
         file,
         status: 'pending' as const,
         progress: 0,
+        uploadedTrackId: null,
+        uploadedCoverUrl: null,
       })),
     ])
   }, [])
@@ -87,7 +95,7 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
       const formData = new FormData()
       formData.append('file', item.file)
 
-      await api.post(
+      const uploadedResponse = await api.post(
         `/stations/${stationId}/tracks/upload?playlistId=${playlistId}`,
         formData,
         {
@@ -100,9 +108,25 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
           },
         },
       )
-
+      const uploadedTrackData = uploadedResponse?.data as
+        | { id: string; hasCover: boolean }
+        | undefined
+      const uploadedCoverUrl =
+        uploadedTrackData?.hasCover && uploadedTrackData.id
+          ? buildTrackCoverUrl(uploadedTrackData.id)
+          : null
       setFiles((prev) =>
-        prev.map((f) => (f.id === item.id ? { ...f, status: 'done' as const, progress: 100 } : f)),
+        prev.map((f) =>
+          f.id === item.id
+            ? {
+                ...f,
+                status: 'done' as const,
+                progress: 100,
+                uploadedTrackId: uploadedTrackData?.id ?? null,
+                uploadedCoverUrl,
+              }
+            : f,
+        ),
       )
       onUploaded?.()
     } catch (err: any) {
@@ -148,7 +172,9 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
         <div className="flex items-center justify-between px-5 py-4 border-b border-[--border]">
           <div>
             <h2 className="font-semibold text-[--text-primary]">Upload Tracks</h2>
-            <p className="text-xs text-[--text-muted] mt-0.5">MP3, FLAC, WAV, AAC supported</p>
+            <p className="text-xs text-[--text-muted] mt-0.5">
+              Supported formats: {supportedUploadFormatsText}. Max size: {maxUploadFileSizeText} per file.
+            </p>
           </div>
           <Button variant="ghost" size="icon-sm" onClick={onClose}>
             <X size={14} />
@@ -186,17 +212,40 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
 
         {/* File list */}
         {files.length > 0 && (
-          <div className="px-5 pb-4 space-y-2 max-h-60 overflow-y-auto">
+          <div className="px-5 pb-4 space-y-1.5 max-h-60 overflow-y-auto">
             {files.map((item) => (
               <div
                 key={item.id}
-                className="flex items-center gap-3 bg-[--bg-subtle] rounded-xl px-3 py-2.5"
+                className={`flex items-center gap-3 rounded-xl px-3 py-2.5 transition-colors ${
+                  item.status === 'done' ? 'bg-[--color-accent-muted]' : 'bg-[--bg-subtle] hover:bg-[--bg]'
+                }`}
               >
-                <Music2 size={14} className="text-[--text-muted] flex-shrink-0" />
+                <div
+                  className={`w-8 h-8 rounded-lg overflow-hidden flex-shrink-0 ${
+                    item.uploadedCoverUrl ? 'bg-[--bg-subtle]' : 'bg-gray-500/20'
+                  }`}
+                >
+                  <TrackCoverImage
+                    src={item.uploadedCoverUrl}
+                    fallbackIconSize={14}
+                    fallbackClassName="w-full h-full flex items-center justify-center"
+                  />
+                </div>
 
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-medium text-[--text-primary] truncate">
                     {item.file.name}
+                  </p>
+                  <p className="text-[10px] text-[--text-muted] mt-0.5">
+                    {formatFileSize(item.file.size)} · {
+                      item.status === 'pending'
+                        ? 'Queued'
+                        : item.status === 'uploading'
+                          ? `Uploading ${item.progress}%`
+                          : item.status === 'done'
+                            ? 'Uploaded'
+                            : 'Upload failed'
+                    }
                   </p>
                   {item.status === 'uploading' && (
                     <div className="mt-1 h-1 rounded-full bg-[--border] overflow-hidden">
@@ -213,7 +262,7 @@ export function UploadModal({ stationId, playlistId, onClose, onUploaded }: Uplo
                 </div>
 
                 {/* Status icon */}
-                <div className="flex-shrink-0">
+                <div className="w-5 flex-shrink-0 flex items-center justify-center">
                   {item.status === 'pending' && (
                     <button
                       onClick={(e) => { e.stopPropagation(); removeFile(item.id) }}
