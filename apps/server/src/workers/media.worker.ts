@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { pipeline } from 'stream/promises'
+import { spawn } from 'child_process'
 import { v4 as uuid } from 'uuid'
 import { PrismaClient, TrackAssetKind, TrackStatus } from '@prisma/client'
 import {
@@ -27,6 +28,24 @@ const MAX_BATCH_PER_TICK = Number.parseInt(
   10,
 )
 const TMP_ROOT = path.join(os.tmpdir(), 'pine-media')
+const TRANSCODE_ENABLED = process.env.MEDIA_ENABLE_TRANSCODE !== '0'
+const FFMPEG_BIN = process.env.FFMPEG_BIN ?? 'ffmpeg'
+const FFMPEG_CHECK_RETRY_MS = Number.parseInt(process.env.FFMPEG_CHECK_RETRY_MS ?? '60000', 10)
+const FFMPEG_TRANSCODE_TIMEOUT_MS = Number.parseInt(
+  process.env.FFMPEG_TRANSCODE_TIMEOUT_MS ?? '600000',
+  10,
+)
+const TRANSCODE_PRESETS: Array<{ kind: TrackAssetKind; suffix: string; bitrateKbps: number }> = [
+  { kind: TrackAssetKind.TRANSCODE_LOW, suffix: 'low', bitrateKbps: 96 },
+  { kind: TrackAssetKind.TRANSCODE_MEDIUM, suffix: 'medium', bitrateKbps: 160 },
+  { kind: TrackAssetKind.TRANSCODE_HIGH, suffix: 'high', bitrateKbps: 256 },
+]
+
+let ffmpegState: { available: boolean; checkedAt: number; warnedAt: number } = {
+  available: false,
+  checkedAt: 0,
+  warnedAt: 0,
+}
 
 function nowIso() {
   return new Date().toISOString()
@@ -95,6 +114,86 @@ function computeBitrateKbps(args: {
   return reportedKbps ?? estimatedKbps ?? null
 }
 
+function resolveTranscodeKey(trackId: string, stationId: string, suffix: string) {
+  return `stations/${stationId}/transcodes/${trackId}-${suffix}.m4a`
+}
+
+async function runSpawn(args: string[], options?: { timeoutMs?: number }) {
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(FFMPEG_BIN, args, {
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+    const stderrChunks: string[] = []
+    let timedOut = false
+    const timeoutMs = Math.max(1_000, options?.timeoutMs ?? FFMPEG_TRANSCODE_TIMEOUT_MS)
+    const timer = setTimeout(() => {
+      timedOut = true
+      proc.kill('SIGKILL')
+    }, timeoutMs)
+
+    proc.stderr.on('data', (chunk) => {
+      stderrChunks.push(String(chunk))
+    })
+
+    proc.on('error', (error) => {
+      clearTimeout(timer)
+      reject(error)
+    })
+
+    proc.on('close', (code) => {
+      clearTimeout(timer)
+      if (code === 0) {
+        resolve()
+        return
+      }
+      const stderr = stderrChunks.join('').trim()
+      const reason = timedOut
+        ? `timed out after ${timeoutMs}ms`
+        : `exit code ${code ?? 'unknown'}`
+      reject(new Error(stderr ? `${reason}: ${stderr}` : reason))
+    })
+  })
+}
+
+async function ensureFfmpegAvailable() {
+  if (!TRANSCODE_ENABLED) {
+    return false
+  }
+
+  const now = Date.now()
+  if (ffmpegState.available && ffmpegState.checkedAt > 0) {
+    return true
+  }
+
+  if (!ffmpegState.available && now - ffmpegState.checkedAt < Math.max(1_000, FFMPEG_CHECK_RETRY_MS)) {
+    return false
+  }
+
+  try {
+    await runSpawn(['-version'], { timeoutMs: 8_000 })
+    ffmpegState = {
+      available: true,
+      checkedAt: now,
+      warnedAt: ffmpegState.warnedAt,
+    }
+    console.log(`[${nowIso()}] ffmpeg detected at "${FFMPEG_BIN}"`)
+    return true
+  } catch (error) {
+    ffmpegState = {
+      available: false,
+      checkedAt: now,
+      warnedAt: ffmpegState.warnedAt,
+    }
+    if (now - ffmpegState.warnedAt > FFMPEG_CHECK_RETRY_MS) {
+      ffmpegState.warnedAt = now
+      console.warn(
+        `[${nowIso()}] ffmpeg not available (${safeMessage(error)}). Transcode generation is paused.`,
+      )
+    }
+    return false
+  }
+}
+
 async function resolveSharpFactory() {
   const sharpModule = (await import('sharp')) as any
   const sharpFactory =
@@ -124,17 +223,45 @@ type ClaimedTrack = {
   genre: string | null
 }
 
-async function claimNextTrack() {
+async function claimNextTrack(transcodeEnabled: boolean) {
   return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRaw<Array<{ id: string }>>`
-      SELECT id
-      FROM tracks
-      WHERE status IN (${TrackStatus.PROCESSING}::"track_status", ${TrackStatus.READY}::"track_status")
-        AND ("coverPath" IS NULL)
-      ORDER BY "updatedAt" ASC
-      LIMIT 1
-      FOR UPDATE SKIP LOCKED
-    `
+    const rows = transcodeEnabled
+      ? await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT t.id
+          FROM tracks t
+          WHERE t.status IN (${TrackStatus.PROCESSING}::"track_status", ${TrackStatus.READY}::"track_status")
+            AND (
+              NOT EXISTS (
+                SELECT 1
+                FROM track_assets ta
+                WHERE ta."trackId" = t.id
+                  AND ta.kind = ${TrackAssetKind.TRANSCODE_LOW}::"track_asset_kind"
+              )
+              OR NOT EXISTS (
+                SELECT 1
+                FROM track_assets ta
+                WHERE ta."trackId" = t.id
+                  AND ta.kind = ${TrackAssetKind.TRANSCODE_MEDIUM}::"track_asset_kind"
+              )
+              OR NOT EXISTS (
+                SELECT 1
+                FROM track_assets ta
+                WHERE ta."trackId" = t.id
+                  AND ta.kind = ${TrackAssetKind.TRANSCODE_HIGH}::"track_asset_kind"
+              )
+            )
+          ORDER BY t."updatedAt" ASC
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        `
+      : await tx.$queryRaw<Array<{ id: string }>>`
+          SELECT t.id
+          FROM tracks t
+          WHERE t.status = ${TrackStatus.PROCESSING}::"track_status"
+          ORDER BY t."updatedAt" ASC
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        `
 
     if (rows.length === 0) return null
 
@@ -172,6 +299,104 @@ async function resolveInputFile(track: ClaimedTrack) {
     localPath,
     cleanup: true,
     objectKey,
+  }
+}
+
+type GeneratedTranscodeAsset = {
+  kind: TrackAssetKind
+  objectKey: string
+  mimeType: string
+  byteSize: number
+  bitrate: number | null
+  sampleRate: number | null
+  channels: number | null
+  duration: number | null
+}
+
+async function generateTranscodes(args: {
+  track: ClaimedTrack
+  inputPath: string
+  transcodeEnabled: boolean
+}): Promise<GeneratedTranscodeAsset[]> {
+  if (!args.transcodeEnabled) return []
+
+  const generated: GeneratedTranscodeAsset[] = []
+  const tmpOutputs: string[] = []
+  const { parseFile } = await import('music-metadata')
+
+  try {
+    for (const preset of TRANSCODE_PRESETS) {
+      const outputPath = path.join(TMP_ROOT, `${args.track.id}-${preset.suffix}-${uuid()}.m4a`)
+      tmpOutputs.push(outputPath)
+
+      await runSpawn(
+        [
+          '-y',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-i',
+          args.inputPath,
+          '-vn',
+          '-map_metadata',
+          '-1',
+          '-c:a',
+          'aac',
+          '-b:a',
+          `${preset.bitrateKbps}k`,
+          '-ac',
+          '2',
+          '-movflags',
+          '+faststart',
+          outputPath,
+        ],
+        { timeoutMs: FFMPEG_TRANSCODE_TIMEOUT_MS },
+      )
+
+      const stat = fs.statSync(outputPath)
+      const meta = await parseFile(outputPath).catch(() => null)
+      const duration =
+        typeof meta?.format?.duration === 'number' && Number.isFinite(meta.format.duration)
+          ? meta.format.duration
+          : null
+      const bitrate = computeBitrateKbps({
+        reportedBitrateBps:
+          typeof meta?.format?.bitrate === 'number' ? meta.format.bitrate : null,
+        durationSeconds: duration,
+        fileSizeBytes: stat.size,
+      })
+      const sampleRate =
+        typeof meta?.format?.sampleRate === 'number' && Number.isFinite(meta.format.sampleRate)
+          ? meta.format.sampleRate
+          : null
+      const channels =
+        typeof meta?.format?.numberOfChannels === 'number' &&
+        Number.isFinite(meta.format.numberOfChannels)
+          ? meta.format.numberOfChannels
+          : 2
+
+      const objectKey = resolveTranscodeKey(args.track.id, args.track.stationId, preset.suffix)
+      await minio.putObject(buckets.transcodes, objectKey, fs.createReadStream(outputPath), stat.size, {
+        'Content-Type': 'audio/mp4',
+      })
+
+      generated.push({
+        kind: preset.kind,
+        objectKey,
+        mimeType: 'audio/mp4',
+        byteSize: stat.size,
+        bitrate,
+        sampleRate,
+        channels,
+        duration,
+      })
+    }
+
+    return generated
+  } finally {
+    for (const tmpOutput of tmpOutputs) {
+      fs.unlink(tmpOutput, () => undefined)
+    }
   }
 }
 
@@ -214,7 +439,7 @@ async function saveCover(params: {
   }
 }
 
-async function processTrack(track: ClaimedTrack) {
+async function processTrack(track: ClaimedTrack, options: { transcodeEnabled: boolean }) {
   const input = await resolveInputFile(track)
 
   try {
@@ -241,6 +466,19 @@ async function processTrack(track: ClaimedTrack) {
         stationId: track.stationId,
         picture,
       })
+    }
+    let transcodeAssets: GeneratedTranscodeAsset[] = []
+    try {
+      transcodeAssets = await generateTranscodes({
+        track,
+        inputPath: input.localPath,
+        transcodeEnabled: options.transcodeEnabled,
+      })
+    } catch (error) {
+      console.warn(
+        `[${nowIso()}] transcode failed for track ${track.id}, keeping original asset only: ${safeMessage(error)}`,
+      )
+      transcodeAssets = []
     }
 
     await prisma.$transaction(async (tx) => {
@@ -312,6 +550,37 @@ async function processTrack(track: ClaimedTrack) {
           },
         })
       }
+
+      for (const transcode of transcodeAssets) {
+        await tx.trackAsset.upsert({
+          where: {
+            trackId_kind: {
+              trackId: track.id,
+              kind: transcode.kind,
+            },
+          },
+          create: {
+            trackId: track.id,
+            kind: transcode.kind,
+            objectKey: transcode.objectKey,
+            mimeType: transcode.mimeType,
+            byteSize: transcode.byteSize,
+            bitrate: transcode.bitrate,
+            sampleRate: transcode.sampleRate,
+            channels: transcode.channels,
+            duration: transcode.duration,
+          },
+          update: {
+            objectKey: transcode.objectKey,
+            mimeType: transcode.mimeType,
+            byteSize: transcode.byteSize,
+            bitrate: transcode.bitrate,
+            sampleRate: transcode.sampleRate,
+            channels: transcode.channels,
+            duration: transcode.duration,
+          },
+        })
+      }
     })
   } finally {
     if (input.cleanup) {
@@ -328,13 +597,15 @@ async function runLoop() {
   polling = true
 
   try {
+    const ffmpegAvailable = await ensureFfmpegAvailable()
+    const transcodeEnabled = TRANSCODE_ENABLED && ffmpegAvailable
     let processed = 0
     while (!stopped && processed < Math.max(1, MAX_BATCH_PER_TICK)) {
-      const track = await claimNextTrack()
+      const track = await claimNextTrack(transcodeEnabled)
       if (!track) break
 
       try {
-        await processTrack(track)
+        await processTrack(track, { transcodeEnabled })
       } catch (error) {
         const message = safeMessage(error)
         console.error(`[${nowIso()}] media processing failed for track ${track.id}: ${message}`)

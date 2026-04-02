@@ -1,13 +1,12 @@
-# Deploy Runbook v2 (Docker Compose)
+# Deploy Runbook (Direct Mode, Docker Compose)
 
 ## Scope
 
-This runbook deploys the full v2 stack with Docker Compose:
+This runbook deploys the direct synchronized playback stack with Docker Compose:
 
 - `postgres`
+- `redis`
 - `minio` + `minio-init`
-- `icecast`
-- `liquidsoap`
 - `api` (NestJS)
 - `playback-worker`
 - `media-worker`
@@ -34,15 +33,16 @@ Edit `infra/.env` and set strong secrets at minimum:
 - `JWT_SECRET`
 - `JWT_REFRESH_SECRET`
 - `MINIO_ROOT_PASSWORD`
-- `ICECAST_SOURCE_PASSWORD`
-- `ICECAST_ADMIN_PASSWORD`
-- `ICECAST_RELAY_PASSWORD`
 - `GRAFANA_ADMIN_PASSWORD` if you enable observability
+
+Also set:
+
+- `MINIO_PUBLIC_ENDPOINT` to a browser-reachable MinIO URL (for direct media URLs in manifests)
 
 ## 3. Build and start all services
 
 ```bash
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml up -d --build
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml up -d --build
 ```
 
 ## 4. Enable observability overlay
@@ -52,7 +52,7 @@ If you want Prometheus, Grafana, and probes:
 ```bash
 docker compose \
   --env-file infra/.env \
-  -f infra/docker-compose.v2.yml \
+  -f infra/docker-compose.direct.yml \
   -f infra/observability/docker-compose.observability.yml \
   up -d --build
 ```
@@ -60,9 +60,9 @@ docker compose \
 ## 5. Verify health
 
 ```bash
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml ps
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml ps
 
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml logs -f api
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml logs -f api
 ```
 
 Expected checks:
@@ -71,8 +71,6 @@ Expected checks:
 - API liveness: `http://<host>/api/health/live`
 - Nginx readiness: `http://<host>/nginx-health`
 - MinIO console: `http://<host>:9001`
-- Icecast stream: `http://<host>/live.mp3` or `http://<host>:8000/`
-- Liquidsoap control snapshot: `/var/lib/liquidsoap/control/playlist.m3u`
 - Web UI: `http://<host>/`
 - Prometheus: `http://<host>:9090` if observability is enabled
 - Grafana: `http://<host>:3002` if observability is enabled
@@ -85,7 +83,7 @@ git fetch origin
 git checkout main
 git pull --ff-only origin main
 
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml up -d --build
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml up -d --build
 ```
 
 If you enabled the observability overlay, rerun the combined command from section 4.
@@ -94,13 +92,13 @@ If you enabled the observability overlay, rerun the combined command from sectio
 
 ```bash
 # stop all
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml down
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml down
 
 # stop all + remove volumes (DANGEROUS: wipes DB/objects)
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml down -v
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml down -v
 
 # restart one service
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml restart api
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml restart api
 ```
 
 ## 8. Rollback (image-level)
@@ -110,7 +108,7 @@ docker compose --env-file infra/.env -f infra/docker-compose.v2.yml restart api
 
 ```bash
 git checkout <stable_tag_or_commit>
-docker compose --env-file infra/.env -f infra/docker-compose.v2.yml up -d --build
+docker compose --env-file infra/.env -f infra/docker-compose.direct.yml up -d --build
 ```
 
 3. If DB schema rollback is required, run a planned rollback procedure first.
@@ -118,8 +116,8 @@ docker compose --env-file infra/.env -f infra/docker-compose.v2.yml up -d --buil
 ## 9. Incident quick triage
 
 1. No sound:
-- check `liquidsoap` logs
-- check `icecast` source connected
+- check `api` and `web` logs
+- check `media-worker` logs (transcodes)
 - check `playback-worker` logs
 - in Grafana, inspect `PINE v2 Playback Health`
 
@@ -135,8 +133,24 @@ docker compose --env-file infra/.env -f infra/docker-compose.v2.yml up -d --buil
 ## 10. Notes
 
 - API runs `prisma migrate deploy` on startup in compose.
-- Current stream URL is controlled by `ICECAST_PUBLIC_URL` / `PUBLIC_STREAM_URL_TEMPLATE`.
-- Liquidsoap reads its playlist from `/var/lib/liquidsoap/control/playlist.m3u` and the worker rewrites it from the queue snapshot.
+- Current playback delivery is direct per-listener (`/api/tracks/:id/manifest` -> direct media URL when enabled).
+- `playback-worker` should run in reconcile mode (`PLAYBACK_COMMAND_POLLING_ENABLED=0`) unless legacy fallback is explicitly needed.
 - For public traffic, users should use `nginx` endpoint (`http://<host>`), not internal container ports.
 - Observability artifacts live in `infra/observability/`.
 - Incident procedures are documented in `docs/RUNBOOK_INCIDENTS_V2.md`.
+
+## 11. Listener load test (k6)
+
+```bash
+k6 run scripts/load/group-listening.k6.js \
+  -e BASE_URL=http://localhost \
+  -e STATION_CODE=<station_code> \
+  -e ACCESS_TOKEN=<optional_jwt> \
+  -e SCENARIO=steady
+```
+
+Scenarios:
+
+- `smoke` (short sanity test)
+- `steady` (default baseline)
+- `burst` (high listener pressure)

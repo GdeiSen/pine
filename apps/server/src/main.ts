@@ -5,6 +5,7 @@ import * as cookieParser from 'cookie-parser'
 import helmet from 'helmet'
 import { AppModule } from './app.module'
 import { isAllowedOrigin, resolveAllowedOrigins } from './common/security/cors'
+import { RedisIoAdapter } from './common/realtime/redis-io.adapter'
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -14,6 +15,7 @@ async function bootstrap() {
   const configService = app.get(ConfigService)
   const clientUrl = configService.get<string>('CLIENT_URL', 'http://localhost:3000')
   const port = configService.get<number>('PORT', 3001)
+  const redisUrl = configService.get<string>('REDIS_URL')?.trim()
   const jwtSecret = configService.get<string>('JWT_SECRET')?.trim()
   const weakSecret =
     !jwtSecret || jwtSecret.length < 32 || /super-secret|change-in-production/i.test(jwtSecret)
@@ -29,6 +31,15 @@ async function bootstrap() {
     configService.get<string>('ALLOWED_ORIGINS'),
     clientUrl,
   )
+
+  if (redisUrl) {
+    const redisAdapter = new RedisIoAdapter(app)
+    await redisAdapter.connectToRedis(redisUrl)
+    app.useWebSocketAdapter(redisAdapter)
+    app.enableShutdownHooks()
+  } else {
+    console.warn('[realtime] REDIS_URL is not set. Running with single-instance Socket.IO fanout.')
+  }
 
   app.use(cookieParser())
   const httpServer = app.getHttpAdapter().getInstance()

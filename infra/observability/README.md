@@ -17,7 +17,7 @@ From the repository root:
 ```bash
 docker compose \
   --env-file infra/.env \
-  -f infra/docker-compose.v2.yml \
+  -f infra/docker-compose.direct.yml \
   -f infra/observability/docker-compose.observability.yml \
   up -d --build
 ```
@@ -38,13 +38,11 @@ Grafana auto-loads the `PINE v2 Playback Health` dashboard from:
 ## Alert coverage
 
 - API readiness failures
-- Stream mount failures
 - Missing playback heartbeat
-- Playback worker stalls
-- Command backlog growth
+- Slow/failed command processing symptoms
 - Outbox backlog growth
 
 ## Assumptions
 
-- The main stack is started with the base compose file first so Prometheus can reach service names like `api`, `postgres`, `icecast`, and `minio` on the shared project network.
+- The main stack is started with the base compose file first so Prometheus can reach service names like `api`, `postgres`, `nginx`, and `minio` on the shared project network.
 - The PostgreSQL user used by `DATABASE_URL` can query the playback tables.

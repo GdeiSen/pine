@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AudioConnectionState, AudioDiagnostics } from '@/stores/station.store'
 import { resolveConfiguredOrigin } from '@/lib/origin'
+import type { PlaybackQualityPreference } from '@web-radio/shared'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 const MEDIA_BASE_URL = process.env.NEXT_PUBLIC_MEDIA_BASE_URL ?? ''
@@ -24,6 +25,7 @@ const VOLUME_FADE_OUT_MS = 380
 const SEEK_FADE_OUT_MS = 220
 const PREFETCH_CLEANUP_DELAY_MS = 1_000
 const TRANSPORT_TRANSITION_MAX_MS = 10_000
+const STREAM_MANIFEST_CACHE_TTL_MS = 5 * 60_000
 
 type DirectTransportPhase = 'idle' | 'pause' | 'track-change' | 'seek'
 
@@ -35,6 +37,32 @@ type UseDirectPlaybackEngineArgs = {
   isPaused: boolean
   trackDuration: number
   volume: number
+  playbackQuality: PlaybackQualityPreference
+}
+
+type StreamManifestResponse = {
+  streamUrl?: string
+  selectedAssetKind?: string
+  selectedQuality?: PlaybackQualityPreference
+  deliveryMode?: 'DIRECT_MEDIA' | 'API_PROXY'
+  availableAssets?: Array<{
+    kind?: string
+    quality?: PlaybackQualityPreference
+    mimeType?: string
+    bitrate?: number | null
+    sampleRate?: number | null
+    channels?: number | null
+    duration?: number | null
+    byteSize?: number | null
+  }>
+}
+
+export type MediaDeliveryInfo = {
+  selectedAssetKind: string | null
+  selectedQuality: PlaybackQualityPreference | null
+  selectedBitrate: number | null
+  selectedMimeType: string | null
+  deliveryMode: 'DIRECT_MEDIA' | 'API_PROXY' | null
 }
 
 function getAccessToken(): string | null {
@@ -42,13 +70,92 @@ function getAccessToken(): string | null {
   return localStorage.getItem('access_token')
 }
 
-function buildStreamUrl(trackId: string): string {
+function normalizePlaybackQuality(value: unknown): PlaybackQualityPreference {
+  switch (String(value ?? '').toUpperCase()) {
+    case 'LOW':
+      return 'LOW'
+    case 'MEDIUM':
+      return 'MEDIUM'
+    case 'HIGH':
+      return 'HIGH'
+    case 'ORIGINAL':
+      return 'ORIGINAL'
+    default:
+      return 'AUTO'
+  }
+}
+
+function buildStreamUrl(trackId: string, playbackQuality: PlaybackQualityPreference): string {
   const token = getAccessToken()
   const backendOrigin = resolveConfiguredOrigin(MEDIA_BASE_URL)
   const base = backendOrigin
     ? `${backendOrigin}/api/tracks/${trackId}/stream`
     : `${API_URL}/tracks/${trackId}/stream`
-  return token ? `${base}?access_token=${encodeURIComponent(token)}` : base
+
+  const params = new URLSearchParams()
+  params.set('quality', normalizePlaybackQuality(playbackQuality))
+  if (token) {
+    params.set('access_token', token)
+  }
+
+  return `${base}?${params.toString()}`
+}
+
+function buildManifestUrl(trackId: string, playbackQuality: PlaybackQualityPreference): string {
+  const token = getAccessToken()
+  const backendOrigin = resolveConfiguredOrigin(MEDIA_BASE_URL)
+  const base = backendOrigin
+    ? `${backendOrigin}/api/tracks/${trackId}/manifest`
+    : `${API_URL}/tracks/${trackId}/manifest`
+
+  const params = new URLSearchParams()
+  params.set('quality', normalizePlaybackQuality(playbackQuality))
+  if (token) {
+    params.set('access_token', token)
+  }
+  return `${base}?${params.toString()}`
+}
+
+function withAccessToken(url: string) {
+  const token = getAccessToken()
+  if (!token) return url
+
+  try {
+    const parsed = new URL(url, typeof window !== 'undefined' ? window.location.href : undefined)
+    const isPresignedUrl =
+      parsed.searchParams.has('X-Amz-Signature') ||
+      parsed.searchParams.has('X-Amz-Credential') ||
+      parsed.searchParams.has('X-Amz-Algorithm') ||
+      parsed.searchParams.has('Signature')
+    if (isPresignedUrl) {
+      return parsed.toString()
+    }
+    const isApiPath = parsed.pathname.includes('/api/')
+    if (!isApiPath) {
+      return parsed.toString()
+    }
+    if (!parsed.searchParams.has('access_token')) {
+      parsed.searchParams.set('access_token', token)
+    }
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+function resolveStreamUrlCandidate(rawUrl: string): string {
+  const backendOrigin = resolveConfiguredOrigin(MEDIA_BASE_URL)
+  try {
+    if (backendOrigin) {
+      return new URL(rawUrl, backendOrigin).toString()
+    }
+    if (typeof window !== 'undefined') {
+      return new URL(rawUrl, window.location.origin).toString()
+    }
+  } catch {
+    return rawUrl
+  }
+  return rawUrl
 }
 
 function normalizeMediaUrl(url: string): string {
@@ -57,6 +164,66 @@ function normalizeMediaUrl(url: string): string {
     return new URL(url, window.location.href).href
   } catch {
     return url
+  }
+}
+
+function resolveManifestSelectedAsset(payload: StreamManifestResponse) {
+  const assets = Array.isArray(payload.availableAssets) ? payload.availableAssets : []
+  const selectedAssetKind = typeof payload.selectedAssetKind === 'string' ? payload.selectedAssetKind : null
+  const byKind = selectedAssetKind
+    ? assets.find((asset) => asset?.kind === selectedAssetKind)
+    : null
+
+  if (byKind) return byKind
+
+  const selectedQuality = payload.selectedQuality ?? null
+  if (!selectedQuality) return null
+  return assets.find((asset) => asset?.quality === selectedQuality) ?? null
+}
+
+function buildFallbackDeliveryInfo(
+  requestedQuality: PlaybackQualityPreference,
+): MediaDeliveryInfo {
+  return {
+    selectedAssetKind: null,
+    selectedQuality: requestedQuality === 'AUTO' ? null : requestedQuality,
+    selectedBitrate: null,
+    selectedMimeType: null,
+    deliveryMode: 'API_PROXY',
+  }
+}
+
+function toMediaDeliveryInfo(
+  payload: StreamManifestResponse,
+  requestedQuality: PlaybackQualityPreference,
+): MediaDeliveryInfo {
+  const selectedAsset = resolveManifestSelectedAsset(payload)
+
+  return {
+    selectedAssetKind:
+      typeof payload.selectedAssetKind === 'string'
+        ? payload.selectedAssetKind
+        : typeof selectedAsset?.kind === 'string'
+          ? selectedAsset.kind
+          : null,
+    selectedQuality:
+      payload.selectedQuality ?? (typeof selectedAsset?.quality === 'string'
+        ? normalizePlaybackQuality(selectedAsset.quality)
+        : requestedQuality === 'AUTO'
+          ? null
+          : requestedQuality),
+    selectedBitrate:
+      typeof selectedAsset?.bitrate === 'number' && Number.isFinite(selectedAsset.bitrate)
+        ? Math.max(1, Math.round(selectedAsset.bitrate))
+        : null,
+    selectedMimeType:
+      typeof selectedAsset?.mimeType === 'string' && selectedAsset.mimeType.trim().length > 0
+        ? selectedAsset.mimeType.trim().toLowerCase()
+        : null,
+    deliveryMode:
+      payload.deliveryMode === 'DIRECT_MEDIA' || payload.deliveryMode === 'API_PROXY'
+        ? payload.deliveryMode
+        : null,
   }
 }
 
@@ -99,11 +266,16 @@ export function useDirectPlaybackEngine({
   isPaused,
   trackDuration,
   volume,
+  playbackQuality,
 }: UseDirectPlaybackEngineArgs) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const mountedRef = useRef(false)
   const currentTrackIdRef = useRef<string | null>(null)
   const sourceUrlRef = useRef<string | null>(null)
+  const sourceDescriptorRef = useRef<{
+    trackId: string
+    quality: PlaybackQualityPreference
+  } | null>(null)
   const desiredStateRef = useRef({ trackId, isPaused })
   const playTokenRef = useRef(0)
   const driftTimerRef = useRef<number | null>(null)
@@ -122,11 +294,25 @@ export function useDirectPlaybackEngine({
   const trackDurationRef = useRef(trackDuration)
   const currentPositionRef = useRef(currentPosition)
   const trackStartedAtRef = useRef(trackStartedAt)
+  const playbackQualityRef = useRef<PlaybackQualityPreference>(
+    normalizePlaybackQuality(playbackQuality),
+  )
   const stallRecoveryTimerRef = useRef<number | null>(null)
   const stallRecoveryAttemptsRef = useRef(0)
   const sourcePlaybackStartedRef = useRef(false)
   const prefetchAudioRef = useRef<HTMLAudioElement | null>(null)
   const prefetchUrlRef = useRef<string | null>(null)
+  const streamManifestCacheRef = useRef<
+    Map<
+      string,
+      {
+        streamUrl: string
+        expiresAt: number
+        deliveryInfo: MediaDeliveryInfo
+      }
+    >
+  >(new Map())
+  const trackLoadRequestTokenRef = useRef(0)
   const transportTransitionRef = useRef<{
     token: number
     phase: DirectTransportPhase
@@ -144,6 +330,69 @@ export function useDirectPlaybackEngine({
   const [audioDiagnostics, setAudioDiagnostics] = useState<AudioDiagnostics | null>(null)
   const [audioNeedsRestart, setAudioNeedsRestart] = useState(false)
   const [mediaDuration, setMediaDuration] = useState<number | null>(null)
+  const [mediaDeliveryInfo, setMediaDeliveryInfo] = useState<MediaDeliveryInfo | null>(null)
+
+  const resolveManifestAwareStreamUrl = useCallback(
+    async (id: string, quality: PlaybackQualityPreference) => {
+      const normalizedQuality = normalizePlaybackQuality(quality)
+      const cacheKey = `${id}:${normalizedQuality}`
+      const now = Date.now()
+      const cached = streamManifestCacheRef.current.get(cacheKey)
+      if (cached && cached.expiresAt > now) {
+        return {
+          streamUrl: cached.streamUrl,
+          deliveryInfo: cached.deliveryInfo,
+        }
+      }
+
+      const fallbackUrl = normalizeMediaUrl(buildStreamUrl(id, normalizedQuality))
+      const fallbackDeliveryInfo = buildFallbackDeliveryInfo(normalizedQuality)
+
+      try {
+        const response = await fetch(buildManifestUrl(id, normalizedQuality), {
+          method: 'GET',
+          cache: 'no-store',
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        })
+
+        if (!response.ok) {
+          return {
+            streamUrl: fallbackUrl,
+            deliveryInfo: fallbackDeliveryInfo,
+          }
+        }
+
+        const payload = (await response.json().catch(() => null)) as StreamManifestResponse | null
+        if (!payload?.streamUrl || typeof payload.streamUrl !== 'string') {
+          return {
+            streamUrl: fallbackUrl,
+            deliveryInfo: fallbackDeliveryInfo,
+          }
+        }
+
+        const resolved = normalizeMediaUrl(
+          withAccessToken(resolveStreamUrlCandidate(payload.streamUrl)),
+        )
+        const deliveryInfo = toMediaDeliveryInfo(payload, normalizedQuality)
+        streamManifestCacheRef.current.set(cacheKey, {
+          streamUrl: resolved,
+          expiresAt: now + STREAM_MANIFEST_CACHE_TTL_MS,
+          deliveryInfo,
+        })
+        return {
+          streamUrl: resolved,
+          deliveryInfo,
+        }
+      } catch {
+        return {
+          streamUrl: fallbackUrl,
+          deliveryInfo: fallbackDeliveryInfo,
+        }
+      }
+    },
+    [],
+  )
 
   const setNeedsRestart = useCallback((value: boolean) => {
     if (!mountedRef.current) return
@@ -274,6 +523,10 @@ export function useDirectPlaybackEngine({
     currentPositionRef.current = currentPosition
     trackStartedAtRef.current = trackStartedAt
   }, [currentPosition, isPaused, trackDuration, trackStartedAt])
+
+  useEffect(() => {
+    playbackQualityRef.current = normalizePlaybackQuality(playbackQuality)
+  }, [playbackQuality])
 
   const clearStallRecovery = useCallback((resetAttempts = false) => {
     if (stallRecoveryTimerRef.current !== null) {
@@ -476,25 +729,13 @@ export function useDirectPlaybackEngine({
   )
 
   const loadTrack = useCallback(
-    (id: string, targetPosition: number) => {
+    async (id: string, targetPosition: number) => {
       const audio = audioRef.current
       if (!audio) return
 
-      const url = normalizeMediaUrl(buildStreamUrl(id))
-      const sourceChanged = sourceUrlRef.current !== url
-
-      const desired = desiredStateRef.current
+      const requestToken = ++trackLoadRequestTokenRef.current
       const normalizedTarget = Number.isFinite(targetPosition) ? Math.max(0, targetPosition) : 0
-      let safeTarget = normalizedTarget
-      const currentTrackDuration = trackDurationRef.current
-      if (!sourceChanged && !desired.isPaused && currentTrackDuration > 0) {
-        const bounded = Math.min(normalizedTarget, currentTrackDuration)
-        safeTarget =
-          bounded >= Math.max(currentTrackDuration - TRACK_END_SEEK_GUARD_S, 0)
-            ? 0
-            : bounded
-      }
-      pendingTargetPositionRef.current = safeTarget
+      pendingTargetPositionRef.current = normalizedTarget
       lastTrackLoadAtRef.current = Date.now()
       sourcePlaybackStartedRef.current = false
       playTokenRef.current += 1
@@ -505,18 +746,53 @@ export function useDirectPlaybackEngine({
       stopVolumeFade()
       audio.pause()
 
+      const resolvedQuality = playbackQualityRef.current
+      const resolvedSource = await resolveManifestAwareStreamUrl(id, resolvedQuality)
+      const url = normalizeMediaUrl(resolvedSource.streamUrl)
+
+      if (!mountedRef.current || requestToken !== trackLoadRequestTokenRef.current) {
+        return
+      }
+
+      const sourceChanged = sourceUrlRef.current !== url
+      const desired = desiredStateRef.current
+      let safeTarget = normalizedTarget
+      const currentTrackDuration = trackDurationRef.current
+      if (!sourceChanged && !desired.isPaused && currentTrackDuration > 0) {
+        const bounded = Math.min(normalizedTarget, currentTrackDuration)
+        safeTarget =
+          bounded >= Math.max(currentTrackDuration - TRACK_END_SEEK_GUARD_S, 0)
+            ? 0
+            : bounded
+      }
+      pendingTargetPositionRef.current = safeTarget
+
       if (sourceChanged) {
         setMediaDuration(null)
         sourceUrlRef.current = url
+        sourceDescriptorRef.current = {
+          trackId: id,
+          quality: resolvedQuality,
+        }
         audio.volume = 0
         audio.src = url
         audio.preload = 'auto'
         audio.load()
+      } else if (
+        !sourceDescriptorRef.current ||
+        sourceDescriptorRef.current.trackId !== id ||
+        sourceDescriptorRef.current.quality !== resolvedQuality
+      ) {
+        sourceDescriptorRef.current = {
+          trackId: id,
+          quality: resolvedQuality,
+        }
       } else if (audio.readyState < HTMLMediaElement.HAVE_METADATA) {
         audio.load()
       }
 
       if (desired.trackId !== id) return
+      setMediaDeliveryInfo(resolvedSource.deliveryInfo)
 
       if (desired.isPaused) {
         setConnectionStatus('paused', null)
@@ -534,6 +810,7 @@ export function useDirectPlaybackEngine({
       clearResumeSyncGrace,
       clearStallRecovery,
       clearTransitionState,
+      resolveManifestAwareStreamUrl,
       setConnectionStatus,
       startPlayback,
       stopVolumeFade,
@@ -944,6 +1221,7 @@ export function useDirectPlaybackEngine({
       mountedRef.current = false
       engineCallbacksRef.current.stopVolumeFade()
       setMediaDuration(null)
+      setMediaDeliveryInfo(null)
       audio.removeEventListener('loadedmetadata', onLoadedMetadata)
       audio.removeEventListener('durationchange', updateMediaDuration)
       audio.removeEventListener('canplay', onCanPlay)
@@ -965,6 +1243,7 @@ export function useDirectPlaybackEngine({
       prefetchAudioRef.current = null
       prefetchUrlRef.current = null
       sourceUrlRef.current = null
+      sourceDescriptorRef.current = null
       pendingTargetPositionRef.current = null
       engineCallbacksRef.current.finishTransportTransition()
       engineCallbacksRef.current.clearTransitionState()
@@ -1007,37 +1286,51 @@ export function useDirectPlaybackEngine({
       return
     }
 
-    const nextUrl = normalizeMediaUrl(buildStreamUrl(nextTrackId))
-    if (prefetchUrlRef.current === nextUrl) {
-      return
+    let cancelled = false
+    let createdPrefetch: HTMLAudioElement | null = null
+
+    const resolveAndPrefetch = async () => {
+      const resolvedSource = await resolveManifestAwareStreamUrl(
+        nextTrackId,
+        playbackQualityRef.current,
+      )
+      const nextUrl = normalizeMediaUrl(resolvedSource.streamUrl)
+      if (cancelled) return
+      if (prefetchUrlRef.current === nextUrl) {
+        return
+      }
+
+      const prefetchAudio = new Audio()
+      createdPrefetch = prefetchAudio
+      prefetchAudio.preload = 'auto'
+      prefetchAudio.src = nextUrl
+      prefetchAudio.load()
+
+      const previous = prefetchAudioRef.current
+      prefetchAudioRef.current = prefetchAudio
+      prefetchUrlRef.current = nextUrl
+
+      if (previous) {
+        window.setTimeout(() => {
+          previous.pause()
+          previous.removeAttribute('src')
+          previous.load()
+        }, PREFETCH_CLEANUP_DELAY_MS)
+      }
     }
 
-    const prefetchAudio = new Audio()
-    prefetchAudio.preload = 'auto'
-    prefetchAudio.src = nextUrl
-    prefetchAudio.load()
-
-    const previous = prefetchAudioRef.current
-    prefetchAudioRef.current = prefetchAudio
-    prefetchUrlRef.current = nextUrl
-
-    if (previous) {
-      window.setTimeout(() => {
-        previous.pause()
-        previous.removeAttribute('src')
-        previous.load()
-      }, PREFETCH_CLEANUP_DELAY_MS)
-    }
+    void resolveAndPrefetch()
 
     return () => {
-      if (prefetchAudioRef.current !== prefetchAudio) return
+      cancelled = true
+      if (!createdPrefetch || prefetchAudioRef.current !== createdPrefetch) return
       prefetchAudioRef.current = null
       prefetchUrlRef.current = null
-      prefetchAudio.pause()
-      prefetchAudio.removeAttribute('src')
-      prefetchAudio.load()
+      createdPrefetch.pause()
+      createdPrefetch.removeAttribute('src')
+      createdPrefetch.load()
     }
-  }, [prefetchTrackId, trackId])
+  }, [playbackQuality, prefetchTrackId, resolveManifestAwareStreamUrl, trackId])
 
   // Track change — reload and seek
   useEffect(() => {
@@ -1047,10 +1340,12 @@ export function useDirectPlaybackEngine({
       if (audio) {
         stopVolumeFade()
         setMediaDuration(null)
+        setMediaDeliveryInfo(null)
         audio.pause()
         audio.removeAttribute('src')
         audio.load()
         sourceUrlRef.current = null
+        sourceDescriptorRef.current = null
         pendingTargetPositionRef.current = null
         playTokenRef.current += 1
         sourcePlaybackStartedRef.current = false
@@ -1103,8 +1398,11 @@ export function useDirectPlaybackEngine({
       )
     } else if (audio.paused) {
       const expectedPos = getExpectedPosition()
-      const nextUrl = normalizeMediaUrl(buildStreamUrl(trackId))
-      if (sourceUrlRef.current !== nextUrl || !!audio.error || !audio.currentSrc) {
+      const resolvedQuality = playbackQualityRef.current
+      const hasMatchingSourceDescriptor =
+        sourceDescriptorRef.current?.trackId === trackId &&
+        sourceDescriptorRef.current?.quality === resolvedQuality
+      if (!hasMatchingSourceDescriptor || !!audio.error || !audio.currentSrc) {
         void loadTrack(trackId, expectedPos >= 0 ? expectedPos : 0)
         return
       }
@@ -1197,9 +1495,12 @@ export function useDirectPlaybackEngine({
     clearResumeSyncGrace()
     const targetPosition = getExpectedPosition()
     const audio = audioRef.current
-    const expectedUrl = normalizeMediaUrl(buildStreamUrl(trackId))
+    const resolvedQuality = playbackQualityRef.current
+    const hasMatchingSourceDescriptor =
+      sourceDescriptorRef.current?.trackId === trackId &&
+      sourceDescriptorRef.current?.quality === resolvedQuality
 
-    if (audio && sourceUrlRef.current === expectedUrl && audio.currentSrc) {
+    if (audio && hasMatchingSourceDescriptor && audio.currentSrc) {
       pendingTargetPositionRef.current = targetPosition >= 0 ? targetPosition : 0
       applyTargetPosition(pendingTargetPositionRef.current, 'strict')
       void startPlayback('Restarting track...', {
@@ -1293,6 +1594,7 @@ export function useDirectPlaybackEngine({
   return {
     audioRef,
     mediaDuration,
+    mediaDeliveryInfo,
     audioConnectionState,
     audioConnectionMessage,
     audioDiagnostics,

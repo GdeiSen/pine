@@ -60,6 +60,32 @@ function getTrackFormatLabel(filename?: string | null, quality?: string | null) 
   }
 }
 
+function getTrackFormatLabelFromMimeType(mimeType?: string | null) {
+  const normalized = String(mimeType ?? "").trim().toLowerCase();
+  switch (normalized) {
+    case "audio/mpeg":
+      return "MP3";
+    case "audio/flac":
+    case "audio/x-flac":
+      return "FLAC";
+    case "audio/wav":
+    case "audio/x-wav":
+      return "WAV";
+    case "audio/mp4":
+    case "audio/aac":
+    case "audio/x-m4a":
+      return "M4A";
+    case "audio/ogg":
+      return "OGG";
+    case "audio/opus":
+      return "OPUS";
+    case "audio/webm":
+      return "WEBM";
+    default:
+      return null;
+  }
+}
+
 function getTrackDeliveryLabel(args: { bitrate?: number | null; quality?: string | null }) {
   if (args.quality === "LOSSLESS") {
     return "Lossless";
@@ -74,6 +100,8 @@ function getTrackDeliveryLabel(args: { bitrate?: number | null; quality?: string
       return "Medium quality";
     case "LOW":
       return "Low quality";
+    case "ORIGINAL":
+      return "Original quality";
     default:
       return null;
   }
@@ -122,6 +150,13 @@ interface TrackInfoProps {
     rttMs: number | null;
     updatedAt: number;
   } | null;
+  mediaDeliveryInfo?: {
+    selectedAssetKind: string | null;
+    selectedQuality: string | null;
+    selectedBitrate: number | null;
+    selectedMimeType: string | null;
+    deliveryMode: "DIRECT_MEDIA" | "API_PROXY" | null;
+  } | null;
   loopMode: LoopMode;
   shuffleEnabled: boolean;
   onPlayPause: () => void;
@@ -150,6 +185,7 @@ export function TrackInfo({
   audioConnectionState,
   audioConnectionMessage,
   audioDiagnostics,
+  mediaDeliveryInfo = null,
   loopMode,
   shuffleEnabled,
   onPlayPause,
@@ -240,12 +276,22 @@ export function TrackInfo({
     }
     return "Checking player state and preparing playback.";
   })();
-  const trackFormatLabel = getTrackFormatLabel(track?.filename, track?.quality);
+  const trackFormatLabel =
+    getTrackFormatLabelFromMimeType(mediaDeliveryInfo?.selectedMimeType) ??
+    getTrackFormatLabel(track?.filename, track?.quality);
   const trackDeliveryLabel = getTrackDeliveryLabel({
-    bitrate: track?.bitrate,
-    quality: track?.quality,
+    bitrate: mediaDeliveryInfo?.selectedBitrate ?? track?.bitrate,
+    quality: mediaDeliveryInfo?.selectedQuality ?? track?.quality,
   });
-  const leftMeta = [trackFormatLabel, trackDeliveryLabel].filter(Boolean).join(" · ");
+  const deliveryModeLabel =
+    mediaDeliveryInfo?.deliveryMode === "DIRECT_MEDIA"
+      ? "Direct"
+      : mediaDeliveryInfo?.deliveryMode === "API_PROXY"
+        ? "Proxy"
+        : null;
+  const leftMeta = [trackFormatLabel, trackDeliveryLabel, deliveryModeLabel]
+    .filter(Boolean)
+    .join(" · ");
   const albumYearLabel = [track?.album, track?.year].filter(Boolean).join(" · ");
   const genreLabel = track?.genre?.trim() ?? "";
   const hasAlbumYear = albumYearLabel.length > 0;

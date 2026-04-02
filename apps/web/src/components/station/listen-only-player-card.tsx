@@ -32,6 +32,13 @@ interface ListenOnlyPlayerCardProps {
     rttMs: number | null
     updatedAt: number
   } | null
+  mediaDeliveryInfo?: {
+    selectedAssetKind: string | null
+    selectedQuality: string | null
+    selectedBitrate: number | null
+    selectedMimeType: string | null
+    deliveryMode: 'DIRECT_MEDIA' | 'API_PROXY' | null
+  } | null
   onRestartAudio: () => void
 }
 
@@ -48,6 +55,7 @@ export function ListenOnlyPlayerCard({
   audioConnectionState,
   audioConnectionMessage,
   audioDiagnostics,
+  mediaDeliveryInfo = null,
   onRestartAudio,
 }: ListenOnlyPlayerCardProps) {
   return (
@@ -74,6 +82,7 @@ export function ListenOnlyPlayerCard({
           audioConnectionState={audioConnectionState}
           audioConnectionMessage={audioConnectionMessage}
           audioDiagnostics={audioDiagnostics}
+          mediaDeliveryInfo={mediaDeliveryInfo}
           loopMode="none"
           shuffleEnabled={false}
           onPlayPause={() => {}}

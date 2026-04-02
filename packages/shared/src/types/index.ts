@@ -33,11 +33,16 @@ export enum TrackQuality {
   LOSSLESS = 'LOSSLESS',
 }
 
-export enum StreamQuality {
-  LOW = 'LOW',
-  MEDIUM = 'MEDIUM',
-  HIGH = 'HIGH',
-}
+export const PLAYBACK_QUALITY_PREFERENCES = [
+  'AUTO',
+  'LOW',
+  'MEDIUM',
+  'HIGH',
+  'ORIGINAL',
+] as const
+
+export type PlaybackQualityPreference =
+  (typeof PLAYBACK_QUALITY_PREFERENCES)[number]
 
 export enum TrackStatus {
   UPLOADING = 'UPLOADING',
@@ -62,7 +67,6 @@ export enum SystemQueueMode {
 
 export enum StationPlaybackMode {
   DIRECT = 'DIRECT',
-  BROADCAST = 'BROADCAST',
 }
 
 export enum PlaybackCommandType {
@@ -171,7 +175,6 @@ export interface Station {
   currentTrack: TrackPublic | null
   currentPosition: number
   crossfadeDuration: number
-  streamQuality: StreamQuality
   playbackMode: StationPlaybackMode
   playbackVersion?: number
   activePlaylistId: string | null

@@ -18,6 +18,20 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   minio:
     image: minio/minio:latest
     restart: unless-stopped
@@ -80,11 +94,13 @@ services:
       CLIENT_URL: ${CLIENT_URL:-http://localhost:3000}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
       STORAGE_PATH: /data/storage
-      PUBLIC_STREAM_URL_TEMPLATE: ${PUBLIC_STREAM_URL_TEMPLATE:-http://localhost:8000/live.mp3}
-      ICECAST_PUBLIC_URL: ${ICECAST_PUBLIC_URL:-http://localhost:8000/live.mp3}
       PLAYBACK_OUTBOX_POLL_INTERVAL_MS: ${PLAYBACK_OUTBOX_POLL_INTERVAL_MS:-400}
       PLAYBACK_OUTBOX_BATCH_SIZE: ${PLAYBACK_OUTBOX_BATCH_SIZE:-100}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      MEDIA_DIRECT_URLS_ENABLED: ${MEDIA_DIRECT_URLS_ENABLED:-1}
+      MEDIA_DIRECT_URL_TTL_SEC: ${MEDIA_DIRECT_URL_TTL_SEC:-900}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
       MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
@@ -96,6 +112,8 @@ services:
       - api_storage:/data/storage
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       minio:
         condition: service_healthy
@@ -120,6 +138,7 @@ services:
       APP_DEPLOYMENT_MODE: direct
       DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
       STORAGE_PATH: /data/storage
+      PLAYBACK_COMMAND_POLLING_ENABLED: ${PLAYBACK_COMMAND_POLLING_ENABLED:-0}
       PLAYBACK_POLL_INTERVAL_MS: ${PLAYBACK_POLL_INTERVAL_MS:-500}
       PLAYBACK_HEARTBEAT_INTERVAL_MS: ${PLAYBACK_HEARTBEAT_INTERVAL_MS:-30000}
       PLAYBACK_RECONCILE_INTERVAL_MS: ${PLAYBACK_RECONCILE_INTERVAL_MS:-5000}
@@ -179,8 +198,6 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
         NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-}
         NEXT_PUBLIC_MEDIA_BASE_URL: ${NEXT_PUBLIC_MEDIA_BASE_URL:-}
-        NEXT_PUBLIC_STREAM_URL: ${NEXT_PUBLIC_STREAM_URL:-http://localhost:8000/live.mp3}
-        NEXT_PUBLIC_STREAM_PROXY_TARGET: ${NEXT_PUBLIC_STREAM_PROXY_TARGET:-http://icecast:8000}
         NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-PINE}
         NEXT_PUBLIC_AUDIO_DEBUG: ${NEXT_PUBLIC_AUDIO_DEBUG:-}
         NEXT_PUBLIC_APP_DEPLOYMENT_MODE: direct
@@ -190,8 +207,6 @@ services:
       NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-}
       NEXT_PUBLIC_MEDIA_BASE_URL: ${NEXT_PUBLIC_MEDIA_BASE_URL:-}
       NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-PINE}
-      NEXT_PUBLIC_STREAM_URL: ${NEXT_PUBLIC_STREAM_URL:-http://localhost:8000/live.mp3}
-      NEXT_PUBLIC_STREAM_PROXY_TARGET: ${NEXT_PUBLIC_STREAM_PROXY_TARGET:-http://icecast:8000}
       NEXT_PUBLIC_AUDIO_DEBUG: ${NEXT_PUBLIC_AUDIO_DEBUG:-}
       BACKEND_PROXY_TARGET: ${BACKEND_PROXY_TARGET:-http://api:3001}
       NEXT_PUBLIC_APP_DEPLOYMENT_MODE: direct
@@ -227,6 +242,7 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   minio_data:
   api_storage:
   nginx_logs:

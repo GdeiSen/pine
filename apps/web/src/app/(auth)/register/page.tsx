@@ -61,7 +61,7 @@ export default function RegisterPage() {
           <h1 className="text-2xl font-bold text-[--text-primary] mb-1">
             Create account
           </h1>
-          <p className="text-sm text-[--text-muted] mb-6">Start broadcasting in minutes</p>
+          <p className="text-sm text-[--text-muted] mb-6">Start group listening in minutes</p>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <Input

@@ -1,8 +1,4 @@
 /* eslint-disable no-console */
-import { createHash } from 'crypto'
-import * as net from 'net'
-import * as path from 'path'
-import * as fs from 'fs/promises'
 import {
   PlaybackCommandStatus,
   PlaybackCommandType,
@@ -12,21 +8,14 @@ import {
   QueueItemStatus,
   QueueType,
 } from '@prisma/client'
-import {
-  createMinioClientFromEnv,
-  resolveBucketByScope,
-  resolveStorageBucketsFromEnv,
-} from '../modules/storage/storage.config'
 
 const prisma = new PrismaClient()
-const minioClient = createMinioClientFromEnv()
-const storageBuckets = resolveStorageBucketsFromEnv()
-const tracksBucket = resolveBucketByScope('tracks', storageBuckets)
 
 const POLL_INTERVAL_MS = Number.parseInt(
   process.env.PLAYBACK_POLL_INTERVAL_MS ?? process.env.PLAYOUT_POLL_INTERVAL_MS ?? '100',
   10,
 )
+const COMMAND_POLLING_ENABLED = process.env.PLAYBACK_COMMAND_POLLING_ENABLED === '1'
 const HEARTBEAT_INTERVAL_MS = Number.parseInt(
   process.env.PLAYBACK_HEARTBEAT_INTERVAL_MS ?? process.env.PLAYOUT_HEARTBEAT_INTERVAL_MS ?? '30000',
   10,
@@ -43,69 +32,11 @@ const STUCK_COMMAND_RECOVERY_INTERVAL_MS = Math.max(
   10_000,
   Number.parseInt(process.env.PLAYBACK_STUCK_COMMAND_RECOVERY_INTERVAL_MS ?? '30000', 10),
 )
-const LIQUIDSOAP_CONTROL_DIR = process.env.LIQUIDSOAP_CONTROL_DIR ?? '/var/lib/liquidsoap/control'
-const LIQUIDSOAP_CACHE_DIR = process.env.LIQUIDSOAP_CACHE_DIR ?? '/var/lib/liquidsoap/cache'
-const LIQUIDSOAP_TELNET_HOST = process.env.LIQUIDSOAP_TELNET_HOST ?? 'liquidsoap'
-const LIQUIDSOAP_TELNET_PORT = Number.parseInt(process.env.LIQUIDSOAP_TELNET_PORT ?? '1234', 10)
-const LIQUIDSOAP_SOURCE_ID = (process.env.LIQUIDSOAP_SOURCE_ID ?? 'radio').trim() || 'radio'
-const CONTROL_PLAYLIST_FILE = path.join(LIQUIDSOAP_CONTROL_DIR, 'playlist.m3u')
-const CONTROL_STATE_FILE = path.join(LIQUIDSOAP_CONTROL_DIR, 'state.json')
-const CONTROL_ACTIVE_STATION_FILE = path.join(LIQUIDSOAP_CONTROL_DIR, 'active-station.json')
-const PLAYLIST_PREFETCH_LIMIT = Math.max(
-  5,
-  Number.parseInt(process.env.LIQUIDSOAP_PLAYLIST_PREFETCH_LIMIT ?? '100', 10),
-)
-
-const controlFingerprints = new Map<string, string>()
-const controlInFlight = new Set<string>()
 
 type CommandPayload = Record<string, unknown>
 
-type LiquidsoapAction = 'skip'
-
-type TrackRow = {
-  id: string
-  stationId: string
-  originalPath: string
-  filename: string
-  title: string | null
-  artist: string | null
-  duration: number
-}
-
-type QueueSnapshotItem = {
-  id: string
-  stationId: string
-  track: {
-    id: string
-    title: string | null
-    artist: string | null
-    album: string | null
-    duration: number
-    hasCover: boolean
-    quality: string
-    uploadedBy: {
-      id: string
-      username: string
-      avatar: string | null
-    }
-  }
-  addedBy: {
-    id: string
-    username: string
-    avatar: string | null
-  } | null
-  queueType: QueueType
-  position: number
-  status: QueueItemStatus
-}
-
 function nowIso() {
   return new Date().toISOString()
-}
-
-function isDirectOnlyDeployment() {
-  return process.env.APP_DEPLOYMENT_MODE?.trim().toLowerCase() === 'direct'
 }
 
 function safeMessage(error: unknown) {
@@ -168,17 +99,6 @@ function currentPositionFromState(state: {
   return clamp(base, 0, duration)
 }
 
-async function ensureDirectory(dir: string) {
-  await fs.mkdir(dir, { recursive: true })
-}
-
-async function writeAtomic(filePath: string, content: string) {
-  await ensureDirectory(path.dirname(filePath))
-  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`
-  await fs.writeFile(tempPath, content, 'utf8')
-  await fs.rename(tempPath, filePath)
-}
-
 async function recoverStuckCommands() {
   const staleBefore = new Date(Date.now() - STUCK_COMMAND_TTL_MS)
   const recovered = await prisma.playbackCommand.updateMany({
@@ -191,6 +111,24 @@ async function recoverStuckCommands() {
 
   if (recovered.count > 0) {
     console.log(`[${nowIso()}] recovered stale commands: ${recovered.count}`)
+  }
+}
+
+async function expireLegacyQueuedCommands() {
+  const expired = await prisma.playbackCommand.updateMany({
+    where: {
+      status: {
+        in: [PlaybackCommandStatus.PENDING, PlaybackCommandStatus.PROCESSING],
+      },
+    },
+    data: {
+      status: PlaybackCommandStatus.EXPIRED,
+      errorMessage: 'Expired after migration to synchronous command application path',
+    },
+  })
+
+  if (expired.count > 0) {
+    console.log(`[${nowIso()}] expired legacy queued commands: ${expired.count}`)
   }
 }
 
@@ -429,80 +367,6 @@ async function rebuildSystemQueueIfEmptyTx(
   return true
 }
 
-async function sendLiquidsoapRawCommand(command: string, options?: { tolerateUnknown?: boolean }) {
-
-  await new Promise<void>((resolve, reject) => {
-    let settled = false
-    let response = ''
-    let sawEnd = false
-    let wroteQuit = false
-    const finish = (error?: Error | null) => {
-      if (settled) return
-      settled = true
-      if (error) reject(error)
-      else resolve()
-    }
-
-    const socket = net.createConnection(
-      { host: LIQUIDSOAP_TELNET_HOST, port: LIQUIDSOAP_TELNET_PORT },
-      () => {
-        socket.write(`${command}\n`, 'utf8', (writeError) => {
-          if (writeError) {
-            finish(writeError instanceof Error ? writeError : new Error(String(writeError)))
-            socket.destroy()
-          }
-        })
-      },
-    )
-
-    socket.setEncoding('utf8')
-    socket.setTimeout(5000)
-    socket.on('data', (chunk: string) => {
-      response += chunk
-      if (!sawEnd && /(^|\n)END(\r?\n|$)/.test(response)) {
-        sawEnd = true
-        if (!wroteQuit) {
-          wroteQuit = true
-          socket.write('quit\n')
-        }
-      }
-    })
-    socket.on('timeout', () => {
-      finish(new Error(`Liquidsoap telnet command timed out: ${command}`))
-      socket.destroy()
-    })
-    socket.on('error', (error) => {
-      finish(error instanceof Error ? error : new Error(String(error)))
-    })
-    socket.on('close', () => {
-      if (/ERROR:/i.test(response)) {
-        if (options?.tolerateUnknown && /unknown/i.test(response)) {
-          finish()
-          return
-        }
-        finish(new Error(`Liquidsoap telnet command failed: ${command}; response=${response.trim()}`))
-        return
-      }
-      if (!sawEnd && response.trim().length === 0) {
-        finish(new Error(`Liquidsoap telnet command closed without response: ${command}`))
-        return
-      }
-      finish()
-    })
-  })
-}
-
-async function sendLiquidsoapCommand(action: LiquidsoapAction) {
-  const command = `${LIQUIDSOAP_SOURCE_ID}.${action}`
-  await sendLiquidsoapRawCommand(command)
-}
-
-function sanitizePlaylistLabel(track: TrackRow) {
-  const title = (track.title?.trim() || track.filename || track.id).replace(/[\r\n]+/g, ' ')
-  const artist = track.artist?.trim()
-  return artist ? `${title} - ${artist.replace(/[\r\n]+/g, ' ')}` : title
-}
-
 function formatQueueItemSnapshot(item: {
   id: string
   stationId: string
@@ -528,7 +392,7 @@ function formatQueueItemSnapshot(item: {
   queueType: QueueType
   position: number
   status: QueueItemStatus
-}): QueueSnapshotItem {
+}) {
   return {
     id: item.id,
     stationId: item.stationId,
@@ -547,25 +411,6 @@ function formatQueueItemSnapshot(item: {
     position: item.position,
     status: item.status,
   }
-}
-
-async function ensureCachedTrack(track: TrackRow) {
-  const extension = path.extname(track.originalPath) || path.extname(track.filename) || '.mp3'
-  const stationCacheDir = path.join(LIQUIDSOAP_CACHE_DIR, track.stationId)
-  const cachePath = path.join(stationCacheDir, `${track.id}${extension}`)
-
-  try {
-    const stat = await fs.stat(cachePath)
-    if (stat.size > 0) return cachePath
-  } catch {
-    // cache miss, download below
-  }
-
-  await ensureDirectory(stationCacheDir)
-  const tempPath = `${cachePath}.partial-${process.pid}-${Date.now()}`
-  await minioClient.fGetObject(tracksBucket, track.originalPath, tempPath)
-  await fs.rename(tempPath, cachePath)
-  return cachePath
 }
 
 async function normalizePendingQueuePositionsTx(
@@ -861,206 +706,6 @@ async function applyQueueReorderCommand(
   return snapshotQueueTx(tx, stationId)
 }
 
-async function buildLiquidsoapSnapshot(stationId: string) {
-  const station = await prisma.station.findUnique({
-    where: { id: stationId },
-    select: { id: true, systemQueueMode: true },
-  })
-  if (!station) return null
-
-  const playback = await prisma.playbackState.upsert({
-    where: { stationId },
-    create: {
-      stationId,
-      currentTrackId: null,
-      currentQueueItemId: null,
-      currentQueueType: null,
-      currentPosition: 0,
-      currentTrackDuration: 0,
-      trackStartedAt: null,
-      isPaused: true,
-      pausedPosition: 0,
-      loopMode: PlaybackLoopMode.NONE,
-      shuffleEnabled: station.systemQueueMode !== 'SEQUENTIAL',
-      lastSyncedAt: new Date(),
-    },
-    update: {
-      shuffleEnabled: station.systemQueueMode !== 'SEQUENTIAL',
-    },
-  })
-
-  const currentTrack = playback.currentTrackId
-    ? await prisma.track.findUnique({
-        where: { id: playback.currentTrackId },
-        select: {
-          id: true,
-          stationId: true,
-          originalPath: true,
-          filename: true,
-          title: true,
-          artist: true,
-          duration: true,
-        },
-      })
-    : null
-
-  const queueItems = await prisma.queueItem.findMany({
-    where: {
-      stationId,
-      status: QueueItemStatus.PENDING,
-    },
-    include: {
-      track: {
-        select: {
-          id: true,
-          stationId: true,
-          originalPath: true,
-          filename: true,
-          title: true,
-          artist: true,
-          duration: true,
-        },
-      },
-    },
-    orderBy: [{ queueType: 'asc' }, { position: 'asc' }, { createdAt: 'asc' }],
-  })
-
-  const orderedQueueTracks = queueItems
-    .filter((item) => !!item.track)
-    .sort((a, b) => {
-      if (a.queueType === b.queueType) return a.position - b.position
-      return a.queueType === QueueType.USER ? -1 : 1
-    })
-    .map((item) => item.track as TrackRow)
-
-  const trackById = new Map<string, TrackRow>()
-  if (currentTrack) trackById.set(currentTrack.id, currentTrack)
-  for (const track of orderedQueueTracks) {
-    trackById.set(track.id, track)
-  }
-
-  const candidateTracks: TrackRow[] = []
-  if (!playback.isPaused) {
-    if (currentTrack) {
-      candidateTracks.push(currentTrack)
-    } else if (orderedQueueTracks[0]) {
-      candidateTracks.push(orderedQueueTracks[0])
-    }
-  }
-
-  for (const track of orderedQueueTracks) {
-    if (!trackById.has(track.id)) continue
-    if (candidateTracks.some((entry) => entry.id === track.id)) continue
-    candidateTracks.push(track)
-  }
-
-  const limitedTracks = candidateTracks.slice(0, PLAYLIST_PREFETCH_LIMIT)
-
-  const playableEntries: Array<TrackRow & { cachePath: string }> = []
-  for (const track of limitedTracks) {
-    try {
-      const cachePath = await ensureCachedTrack(track)
-      playableEntries.push({ ...track, cachePath })
-    } catch (error) {
-      console.warn(
-        `[${nowIso()}] failed to cache track ${track.id} for station ${stationId}: ${safeMessage(error)}`,
-      )
-    }
-  }
-
-  // Keep the control playlist in the most compatible format for liquidsoap:
-  // one absolute media path per line, without extended M3U metadata.
-  const playlistLines = playableEntries.map((track) => track.cachePath)
-
-  const playlistText = `${playlistLines.join('\n')}\n`
-  const fingerprintSource = JSON.stringify({
-    stationId,
-    currentTrackId: playback.currentTrackId,
-    currentQueueItemId: playback.currentQueueItemId,
-    currentQueueType: playback.currentQueueType,
-    currentPosition: playback.currentPosition,
-    currentTrackDuration: playback.currentTrackDuration,
-    isPaused: playback.isPaused,
-    pausedPosition: playback.pausedPosition,
-    trackStartedAt: playback.trackStartedAt?.toISOString() ?? null,
-    loopMode: playback.loopMode,
-    shuffleEnabled: playback.shuffleEnabled,
-    tracks: playableEntries.map((track) => ({
-      id: track.id,
-      cachePath: track.cachePath,
-      duration: track.duration,
-    })),
-  })
-  const fingerprint = createHash('sha256').update(fingerprintSource).digest('hex')
-
-  return {
-    stationId,
-    sourceId: LIQUIDSOAP_SOURCE_ID,
-    fingerprint,
-    playback: {
-      stationId: playback.stationId,
-      currentTrackId: playback.currentTrackId,
-      currentQueueItemId: playback.currentQueueItemId,
-      currentQueueType: playback.currentQueueType,
-      currentPosition: playback.currentPosition,
-      currentTrackDuration: playback.currentTrackDuration,
-      trackStartedAt: playback.trackStartedAt?.toISOString() ?? null,
-      isPaused: playback.isPaused,
-      pausedPosition: playback.pausedPosition,
-      loopMode: playback.loopMode,
-      shuffleEnabled: playback.shuffleEnabled,
-      version: playback.version,
-      serverTime: nowIso(),
-    },
-    queue: playableEntries.map((track, index) => ({
-      id: track.id,
-      stationId: track.stationId,
-      title: track.title,
-      artist: track.artist,
-      duration: track.duration,
-      filename: track.filename,
-      cachePath: track.cachePath,
-      order: index,
-    })),
-    playlistText,
-  }
-}
-
-async function isBroadcastStation(stationId: string): Promise<boolean> {
-  void stationId
-  return false
-}
-
-async function syncLiquidsoapStation(stationId: string, action?: LiquidsoapAction) {
-  if (controlInFlight.has(stationId)) return
-  controlInFlight.add(stationId)
-
-  try {
-    const snapshot = await buildLiquidsoapSnapshot(stationId)
-    if (!snapshot) return
-
-    const previousFingerprint = controlFingerprints.get(stationId)
-    const changed = previousFingerprint !== snapshot.fingerprint
-
-    await ensureDirectory(LIQUIDSOAP_CONTROL_DIR)
-    await writeAtomic(CONTROL_PLAYLIST_FILE, snapshot.playlistText)
-    await writeAtomic(CONTROL_STATE_FILE, `${JSON.stringify(snapshot, null, 2)}\n`)
-    await writeAtomic(CONTROL_ACTIVE_STATION_FILE, `${JSON.stringify({ stationId, updatedAt: nowIso() }, null, 2)}\n`)
-    controlFingerprints.set(stationId, snapshot.fingerprint)
-
-    if (action === 'skip') {
-      // Make sure playlist source picks up newly written playlist ordering
-      // before we request immediate track transition.
-      await sendLiquidsoapRawCommand(`${LIQUIDSOAP_SOURCE_ID}.reload`, { tolerateUnknown: true })
-      await sendLiquidsoapCommand('skip')
-    }
-  } catch (error) {
-    console.warn(`[${nowIso()}] liquidsoap sync failed for station ${stationId}: ${safeMessage(error)}`)
-  } finally {
-    controlInFlight.delete(stationId)
-  }
-}
-
 async function markTrackPlaybackTransition(
   tx: Omit<PrismaClient, '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'>,
   stationId: string,
@@ -1218,7 +863,6 @@ async function applyCommand(command: {
   createdById: string | null
 }) {
   const payload = asObject(command.payload)
-  let mediaAction: LiquidsoapAction | undefined
 
   if (
     command.type === PlaybackCommandType.QUEUE_ADD ||
@@ -1246,10 +890,7 @@ async function applyCommand(command: {
       }
 
       if (command.type === PlaybackCommandType.QUEUE_ADD && queueAddMode === 'now') {
-        const switched = await applyQueuePlayNowTransition(tx, command.stationId, command.id, now)
-        if (switched) {
-          mediaAction = 'skip'
-        }
+        await applyQueuePlayNowTransition(tx, command.stationId, command.id, now)
       }
 
       const queue = await snapshotQueueTx(tx, command.stationId)
@@ -1277,7 +918,7 @@ async function applyCommand(command: {
       })
     })
 
-    return { mediaAction }
+    return
   }
 
   await prisma.$transaction(async (tx) => {
@@ -1327,7 +968,6 @@ async function applyCommand(command: {
           nextPausedPosition = 0
           nextTrackStartedAt = now
           eventType = PlaybackEventType.TRACK_CHANGED
-          mediaAction = 'skip'
         }
       }
       if (!nextTrackId) {
@@ -1374,46 +1014,44 @@ async function applyCommand(command: {
         nextTrackStartedAt = now
         nextPaused = false
         eventType = PlaybackEventType.TRACK_CHANGED
-        mediaAction = 'skip'
       } else {
-      if (nextQueueItemId) {
-        await tx.queueItem.updateMany({
-          where: { id: nextQueueItemId, status: QueueItemStatus.PLAYING },
-          data: {
-            status: QueueItemStatus.SKIPPED,
-            playedAt: now,
-          },
-        })
-      }
+        if (nextQueueItemId) {
+          await tx.queueItem.updateMany({
+            where: { id: nextQueueItemId, status: QueueItemStatus.PLAYING },
+            data: {
+              status: QueueItemStatus.SKIPPED,
+              playedAt: now,
+            },
+          })
+        }
 
-      const nextItem = await resolveNextQueueItem(tx, command.stationId)
-      if (nextItem) {
-        await tx.queueItem.update({
-          where: { id: nextItem.id },
-          data: { status: QueueItemStatus.PLAYING },
-        })
+        const nextItem = await resolveNextQueueItem(tx, command.stationId)
+        if (nextItem) {
+          await tx.queueItem.update({
+            where: { id: nextItem.id },
+            data: { status: QueueItemStatus.PLAYING },
+          })
 
-        nextTrackId = nextItem.track.id
-        nextQueueItemId = nextItem.id
-        nextQueueType = nextItem.queueType
-        nextDuration = nextItem.track.duration || 0
-        nextPosition = 0
-        nextPausedPosition = 0
-        nextTrackStartedAt = now
-        nextPaused = false
-        eventType = PlaybackEventType.TRACK_CHANGED
-        mediaAction = 'skip'
-      } else {
-        nextTrackId = null
-        nextQueueItemId = null
-        nextQueueType = null
-        nextDuration = 0
-        nextPosition = 0
-        nextPausedPosition = 0
-        nextTrackStartedAt = null
-        nextPaused = true
-        eventType = PlaybackEventType.STATE_CHANGED
-      }
+          nextTrackId = nextItem.track.id
+          nextQueueItemId = nextItem.id
+          nextQueueType = nextItem.queueType
+          nextDuration = nextItem.track.duration || 0
+          nextPosition = 0
+          nextPausedPosition = 0
+          nextTrackStartedAt = now
+          nextPaused = false
+          eventType = PlaybackEventType.TRACK_CHANGED
+        } else {
+          nextTrackId = null
+          nextQueueItemId = null
+          nextQueueType = null
+          nextDuration = 0
+          nextPosition = 0
+          nextPausedPosition = 0
+          nextTrackStartedAt = null
+          nextPaused = true
+          eventType = PlaybackEventType.STATE_CHANGED
+        }
       }
     } else if (command.type === PlaybackCommandType.PREVIOUS) {
       const currentItemId = nextQueueItemId
@@ -1455,7 +1093,6 @@ async function applyCommand(command: {
         nextTrackStartedAt = now
         nextPaused = false
         eventType = PlaybackEventType.TRACK_CHANGED
-        mediaAction = 'skip'
       } else if (currentItemId && currentTrackId && currentQueueType) {
         await tx.queueItem.updateMany({
           where: { id: currentItemId, status: QueueItemStatus.PENDING },
@@ -1490,7 +1127,6 @@ async function applyCommand(command: {
           nextTrackStartedAt = now
           nextPaused = false
           eventType = PlaybackEventType.TRACK_CHANGED
-          mediaAction = 'skip'
         }
       }
     }
@@ -1545,12 +1181,7 @@ async function applyCommand(command: {
       },
     })
 
-    if (command.type === PlaybackCommandType.SET_LOOP) {
-      mediaAction = undefined
-    }
   })
-
-  return { mediaAction }
 }
 
 async function reconcileEndedPlayback() {
@@ -1587,9 +1218,6 @@ async function reconcileEndedPlayback() {
         const result = await markTrackPlaybackTransition(tx, state.stationId, new Date())
         if (!result.changed) return
       })
-      if (await isBroadcastStation(state.stationId)) {
-        await syncLiquidsoapStation(state.stationId)
-      }
     } catch (error) {
       console.warn(
         `[${nowIso()}] failed to reconcile playback for station ${state.stationId}: ${safeMessage(error)}`,
@@ -1612,21 +1240,13 @@ async function runCommandLoop() {
       if (!claimed) break
 
       try {
-        const result = await applyCommand({
+        await applyCommand({
           id: claimed.id,
           stationId: claimed.stationId,
           type: claimed.type,
           payload: claimed.payload,
           createdById: claimed.createdById,
         })
-        const isBroadcast = await isBroadcastStation(claimed.stationId)
-        if (isBroadcast) {
-          if (result.mediaAction) {
-            await syncLiquidsoapStation(claimed.stationId, result.mediaAction)
-          } else {
-            await syncLiquidsoapStation(claimed.stationId)
-          }
-        }
       } catch (error) {
         const message = safeMessage(error)
         await writeRejected(claimed.id, claimed.stationId, message)
@@ -1667,15 +1287,25 @@ async function shutdown() {
 
 async function bootstrap() {
   await prisma.$connect()
-  await recoverStuckCommands()
 
-  console.log(`[${nowIso()}] playback-worker started`)
-  await ensureDirectory(LIQUIDSOAP_CONTROL_DIR)
-  await ensureDirectory(LIQUIDSOAP_CACHE_DIR)
+  console.log(
+    `[${nowIso()}] playback-worker started (commandPolling=${COMMAND_POLLING_ENABLED ? 'enabled' : 'disabled'})`,
+  )
 
-  setInterval(() => {
-    void runCommandLoop()
-  }, Math.max(POLL_INTERVAL_MS, 100))
+  if (COMMAND_POLLING_ENABLED) {
+    await recoverStuckCommands()
+    setInterval(() => {
+      void runCommandLoop()
+    }, Math.max(POLL_INTERVAL_MS, 100))
+
+    setInterval(() => {
+      void recoverStuckCommands().catch((error) => {
+        console.error(`[${nowIso()}] stuck command recovery error: ${safeMessage(error)}`)
+      })
+    }, STUCK_COMMAND_RECOVERY_INTERVAL_MS)
+  } else {
+    await expireLegacyQueuedCommands()
+  }
 
   setInterval(() => {
     void runReconcileLoop()
@@ -1685,13 +1315,9 @@ async function bootstrap() {
     console.log(`[${nowIso()}] playback-worker heartbeat`)
   }, Math.max(HEARTBEAT_INTERVAL_MS, 5_000))
 
-  setInterval(() => {
-    void recoverStuckCommands().catch((error) => {
-      console.error(`[${nowIso()}] stuck command recovery error: ${safeMessage(error)}`)
-    })
-  }, STUCK_COMMAND_RECOVERY_INTERVAL_MS)
-
-  await runCommandLoop()
+  if (COMMAND_POLLING_ENABLED) {
+    await runCommandLoop()
+  }
   await runReconcileLoop()
 }
 

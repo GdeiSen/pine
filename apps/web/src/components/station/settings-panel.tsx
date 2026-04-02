@@ -16,8 +16,6 @@ import { ConfirmModal } from "@/components/ui/confirm-modal";
 import api from "@/lib/api";
 
 type AccessMode = "PUBLIC" | "PRIVATE";
-type StreamQuality = "LOW" | "MEDIUM" | "HIGH";
-type PlaybackMode = "DIRECT";
 
 interface StationSettingsInfo {
   id: string;
@@ -28,8 +26,6 @@ interface StationSettingsInfo {
   accessMode: string;
   isPasswordProtected: boolean;
   crossfadeDuration: number;
-  streamQuality: StreamQuality;
-  playbackMode: PlaybackMode;
 }
 
 interface SettingsPanelProps {
@@ -58,68 +54,6 @@ const ACCESS_OPTIONS: Array<{
   },
 ];
 
-const QUALITY_OPTIONS: Array<{
-  value: StreamQuality;
-  label: string;
-  hint: string;
-  icon: ReactNode;
-}> = [
-  {
-    value: "LOW",
-    label: "LOW",
-    hint: "Data saver",
-    icon: (
-      <div className="flex items-end gap-0.5 h-4">
-        <span className="w-1 h-1.5 rounded-sm bg-current opacity-90" />
-        <span className="w-1 h-2.5 rounded-sm bg-current opacity-45" />
-        <span className="w-1 h-3.5 rounded-sm bg-current opacity-35" />
-      </div>
-    ),
-  },
-  {
-    value: "MEDIUM",
-    label: "MEDIUM",
-    hint: "Balanced",
-    icon: (
-      <div className="flex items-end gap-0.5 h-4">
-        <span className="w-1 h-1.5 rounded-sm bg-current opacity-80" />
-        <span className="w-1 h-2.5 rounded-sm bg-current opacity-80" />
-        <span className="w-1 h-3.5 rounded-sm bg-current opacity-45" />
-      </div>
-    ),
-  },
-  {
-    value: "HIGH",
-    label: "HIGH",
-    hint: "Best quality",
-    icon: (
-      <div className="flex items-end gap-0.5 h-4">
-        <span className="w-1 h-1.5 rounded-sm bg-current opacity-85" />
-        <span className="w-1 h-2.5 rounded-sm bg-current opacity-85" />
-        <span className="w-1 h-3.5 rounded-sm bg-current opacity-85" />
-      </div>
-    ),
-  },
-];
-
-const PLAYBACK_MODE_OPTIONS: Array<{
-  value: PlaybackMode;
-  label: string;
-  hint: string;
-  icon: ReactNode;
-}> = [
-  {
-    value: "DIRECT",
-    label: "Direct",
-    hint: "HTTP stream · seek enabled",
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-        <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 1.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11zM6 5.5l4.5 2.5L6 10.5v-5z" />
-      </svg>
-    ),
-  },
-];
-
 export function SettingsPanel({
   station,
   onBack,
@@ -139,12 +73,6 @@ export function SettingsPanel({
   const [passwordEnabled, setPasswordEnabled] = useState(
     !!station.isPasswordProtected,
   );
-  const [streamQuality, setStreamQuality] = useState<StreamQuality>(
-    (station.streamQuality as StreamQuality) ?? "HIGH",
-  );
-  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>(
-    (station.playbackMode as PlaybackMode) ?? "DIRECT",
-  );
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [coverImageUploading, setCoverImageUploading] = useState(false);
@@ -159,8 +87,6 @@ export function SettingsPanel({
     setCoverImage(station.coverImage ?? null);
     setAccessMode((station.accessMode as AccessMode) ?? "PRIVATE");
     setPasswordEnabled(!!station.isPasswordProtected);
-    setStreamQuality((station.streamQuality as StreamQuality) ?? "HIGH");
-    setPlaybackMode((station.playbackMode as PlaybackMode) ?? "DIRECT");
     setPassword("");
     setError("");
   }, [station]);
@@ -176,10 +102,6 @@ export function SettingsPanel({
   }, []);
 
   const hasPasswordAlready = !!station.isPasswordProtected;
-  const playbackModeOptions = useMemo(
-    () => PLAYBACK_MODE_OPTIONS,
-    [],
-  );
 
   const canSave = useMemo(() => {
     if (!name.trim()) return false;
@@ -212,8 +134,6 @@ export function SettingsPanel({
           accessMode,
           passwordEnabled,
           crossfadeDuration: 3,
-          streamQuality,
-          playbackMode,
           ...(passwordEnabled && password.trim()
             ? { password: password.trim() }
             : {}),
@@ -226,8 +146,6 @@ export function SettingsPanel({
         coverImage,
         accessMode,
         crossfadeDuration: 3,
-        streamQuality,
-        playbackMode,
         isPasswordProtected: passwordEnabled
           ? password.trim().length >= 6 || hasPasswordAlready
           : false,
@@ -471,126 +389,6 @@ export function SettingsPanel({
                   />
                 </div>
               </button>
-            </div>
-          </motion.section>
-
-          <motion.section
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.06 }}
-          >
-            <div className="flex items-center gap-2 mb-6">
-              <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
-                Station Mode
-              </p>
-            </div>
-            <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
-              Tracks stream over HTTP with local playback, seek support, and event-based sync.
-            </p>
-            <div className="flex flex-wrap gap-2 items-stretch">
-              {playbackModeOptions.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => setPlaybackMode(opt.value)}
-                  className="w-[138px] h-[122px] rounded-xl p-3 transition-colors text-left shrink-0 flex flex-col justify-between"
-                  style={{
-                    background:
-                      playbackMode === opt.value
-                        ? isDarkTheme
-                          ? "var(--bg-inset)"
-                          : "rgba(255,255,255,0.92)"
-                        : isDarkTheme
-                          ? "rgba(255,255,255,0.07)"
-                          : "rgba(0,0,0,0.06)",
-                    border: `2px solid ${
-                      playbackMode === opt.value
-                        ? isDarkTheme
-                          ? "var(--color-accent)"
-                          : "rgba(24,23,15,0.55)"
-                        : "var(--border)"
-                    }`,
-                  }}
-                >
-                  <div className="text-[--text-primary]">{opt.icon}</div>
-                  <div>
-                    <p className="text-sm font-semibold text-[--text-primary] leading-tight">
-                      {opt.label}
-                    </p>
-                    <p className="text-[10px] text-[--text-muted] mt-1 leading-tight">
-                      {opt.hint}
-                    </p>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </motion.section>
-
-          <motion.section
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.09 }}
-            className="rounded-2xl mt-2"
-            style={{}}
-          >
-            <div className="h-full flex flex-col justify-between">
-              <p className="mb-6 text-4xl font-black text-[--text-primary] tracking-tight leading-none">
-                Playback
-              </p>
-
-              <div className="mt-5">
-                <p className="-mt-4 mb-4 text-sm text-[--text-muted]">
-                  Direct playback currently sends the original uploaded file to
-                  listeners. Quality presets below are not applied yet because
-                  alternate low/medium/high transcodes are not generated in the
-                  current direct-only pipeline.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {QUALITY_OPTIONS.map((opt) => {
-                    const active = streamQuality === opt.value;
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        disabled
-                        onClick={() => setStreamQuality(opt.value)}
-                        className="w-[138px] h-[122px] rounded-xl p-3 transition-colors text-left shrink-0 flex flex-col justify-between disabled:cursor-not-allowed"
-                        style={{
-                          background: active
-                            ? isDarkTheme
-                              ? "var(--bg-inset)"
-                              : "rgba(255,255,255,0.92)"
-                            : isDarkTheme
-                              ? "rgba(255,255,255,0.07)"
-                              : "rgba(0,0,0,0.06)",
-                          border: `2px solid ${
-                            active
-                              ? isDarkTheme
-                                ? "var(--color-accent)"
-                                : "rgba(24,23,15,0.55)"
-                              : "var(--border)"
-                          }`,
-                          opacity: active ? 0.92 : 0.6,
-                        }}
-                      >
-                        <div className="text-[--text-primary]">{opt.icon}</div>
-                        <div>
-                          <p className="text-sm font-semibold text-[--text-primary]">
-                            {opt.label}
-                          </p>
-                          <p className="text-[10px] text-[--text-muted] mt-1">
-                            {opt.hint}
-                          </p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="mt-3 text-xs text-[--text-muted]">
-                  To make these presets work for listeners, the server needs a
-                  real transcode ladder such as `LOW / MEDIUM / HIGH` assets and
-                  quality-aware stream selection.
-                </p>
-              </div>
             </div>
           </motion.section>
 

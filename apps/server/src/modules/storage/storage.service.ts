@@ -17,6 +17,7 @@ export interface StorageUploadResult {
 export class StorageService {
   private readonly client = createMinioClientFromEnv()
   private readonly buckets = resolveStorageBucketsFromEnv()
+  private readonly minioPublicEndpoint = String(process.env.MINIO_PUBLIC_ENDPOINT ?? '').trim()
 
   buildObjectKey(parts: {
     stationId: string
@@ -28,7 +29,8 @@ export class StorageService {
 
   async presignGetUrl(scope: StorageScope, key: string, expiresInSeconds = 900) {
     const bucket = resolveBucketByScope(scope, this.buckets)
-    return this.client.presignedGetObject(bucket, key, expiresInSeconds)
+    const presigned = await this.client.presignedGetObject(bucket, key, expiresInSeconds)
+    return this.rewritePresignedUrlForPublicAccess(presigned)
   }
 
   async uploadBuffer(
@@ -100,6 +102,27 @@ export class StorageService {
     return {
       bucket,
       key,
+    }
+  }
+
+  private rewritePresignedUrlForPublicAccess(url: string) {
+    if (!this.minioPublicEndpoint) return url
+
+    try {
+      const publicBase = new URL(this.minioPublicEndpoint)
+      const presigned = new URL(url)
+      presigned.protocol = publicBase.protocol
+      presigned.hostname = publicBase.hostname
+      presigned.port = publicBase.port
+      if (publicBase.pathname && publicBase.pathname !== '/') {
+        const basePath = publicBase.pathname.endsWith('/')
+          ? publicBase.pathname.slice(0, -1)
+          : publicBase.pathname
+        presigned.pathname = `${basePath}${presigned.pathname}`
+      }
+      return presigned.toString()
+    } catch {
+      return url
     }
   }
 }

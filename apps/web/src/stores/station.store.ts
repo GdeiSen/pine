@@ -47,8 +47,7 @@ interface StationInfo {
   accessMode: string
   isPasswordProtected: boolean
   crossfadeDuration: number
-  streamQuality: 'LOW' | 'MEDIUM' | 'HIGH'
-  playbackMode: 'DIRECT' | 'BROADCAST'
+  playbackMode: 'DIRECT'
   activePlaylistId: string | null
   listenerCount: number
 }
@@ -67,7 +66,6 @@ interface PlaybackState {
 
 interface StationState {
   station: StationInfo | null
-  stationStreamUrl: string | null
   playback: PlaybackState
   audioNeedsRestart: boolean
   audioConnectionState: AudioConnectionState
@@ -80,7 +78,6 @@ interface StationState {
   isConnecting: boolean
 
   setStation: (station: StationInfo) => void
-  setStationStreamUrl: (stationStreamUrl: string | null) => void
   setPlayback: (playback: Partial<PlaybackState>) => void
   setAudioNeedsRestart: (value: boolean) => void
   setAudioConnection: (value: {
@@ -111,7 +108,6 @@ const initialPlayback: PlaybackState = {
 
 export const useStationStore = create<StationState>((set) => ({
   station: null,
-  stationStreamUrl: null,
   playback: initialPlayback,
   audioNeedsRestart: false,
   audioConnectionState: 'idle',
@@ -124,7 +120,6 @@ export const useStationStore = create<StationState>((set) => ({
   isConnecting: false,
 
   setStation: (station) => set({ station }),
-  setStationStreamUrl: (stationStreamUrl) => set({ stationStreamUrl }),
   setPlayback: (playback) => set((s) => ({ playback: { ...s.playback, ...playback } })),
   setAudioNeedsRestart: (audioNeedsRestart) => set({ audioNeedsRestart }),
   setAudioConnection: ({ state, message = null, diagnostics = null }) =>
@@ -147,7 +142,6 @@ export const useStationStore = create<StationState>((set) => ({
   reset: () =>
     set({
       station: null,
-      stationStreamUrl: null,
       playback: initialPlayback,
       audioNeedsRestart: false,
       audioConnectionState: 'idle',

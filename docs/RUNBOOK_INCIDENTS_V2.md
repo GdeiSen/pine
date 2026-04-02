@@ -1,13 +1,12 @@
-# Incident Runbook v2 (Docker Compose)
+# Incident Runbook (Direct Mode, Docker Compose)
 
 ## Scope
 
-This runbook covers the most common production incidents for the v2 stack:
+This runbook covers the most common production incidents for the direct stack:
 
 - `postgres`
+- `redis`
 - `minio`
-- `icecast`
-- `liquidsoap`
 - `api`
 - `playback-worker`
 - `media-worker`
@@ -20,7 +19,7 @@ All commands assume project root and env file:
 
 ```bash
 cd /path/to/web-radio
-export COMPOSE="docker compose --env-file infra/.env -f infra/docker-compose.v2.yml"
+export COMPOSE="docker compose --env-file infra/.env -f infra/docker-compose.direct.yml"
 ```
 
 ## 1) No sound for listeners
@@ -32,11 +31,11 @@ curl -fsS http://localhost/nginx-health
 curl -fsS http://localhost/api/health/ready
 ```
 
-2. Check Icecast and Liquidsoap logs:
+2. Check API/media worker logs:
 
 ```bash
-$COMPOSE logs --tail=200 icecast
-$COMPOSE logs --tail=200 liquidsoap
+$COMPOSE logs --tail=200 api
+$COMPOSE logs --tail=200 media-worker
 ```
 
 3. Check playback worker heartbeat / command processing:
@@ -45,16 +44,16 @@ $COMPOSE logs --tail=200 liquidsoap
 $COMPOSE logs --tail=200 playback-worker
 ```
 
-4. Validate stream endpoint directly:
+4. Validate station state and manifest endpoint:
 
 ```bash
-curl -I http://localhost/live.mp3
+curl -fsS http://localhost/api/health/ready
 ```
 
-If `5xx` or timeout appears, restart audio pipeline:
+If buffering/seek loops persist, restart playback path:
 
 ```bash
-$COMPOSE restart liquidsoap icecast playback-worker
+$COMPOSE restart api playback-worker
 ```
 
 ## 2) Track stream returns 404 / missing media
@@ -176,9 +175,8 @@ If state is inconsistent and fast recovery is needed:
 
 ```bash
 $COMPOSE down
-$COMPOSE up -d postgres minio
+$COMPOSE up -d postgres redis minio
 $COMPOSE up -d minio-init
-$COMPOSE up -d icecast liquidsoap
 $COMPOSE up -d api playback-worker media-worker
 $COMPOSE up -d web nginx
 $COMPOSE ps
@@ -201,7 +199,7 @@ $COMPOSE up -d --build
 1. Save logs for affected interval:
 
 ```bash
-$COMPOSE logs --since 30m api web playback-worker media-worker icecast liquidsoap minio postgres nginx > /tmp/pine-incident.log
+$COMPOSE logs --since 30m api web playback-worker media-worker minio redis postgres nginx > /tmp/pine-incident.log
 ```
 
 2. Document:

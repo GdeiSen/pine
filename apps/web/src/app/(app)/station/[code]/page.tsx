@@ -317,6 +317,7 @@ export default function StationPage({
     audioConnectionState,
     audioConnectionMessage,
     audioDiagnostics,
+    mediaDeliveryInfo,
     isConnected,
     isConnecting,
     sendPlaybackControl,
@@ -884,6 +885,7 @@ export default function StationPage({
             audioConnectionState={audioConnectionState}
             audioConnectionMessage={audioConnectionMessage}
             audioDiagnostics={audioDiagnostics}
+            mediaDeliveryInfo={mediaDeliveryInfo}
             onRestartAudio={restartAudio}
           />
         ) : (
@@ -1031,8 +1033,6 @@ export default function StationPage({
                 accessMode: station?.accessMode ?? "PRIVATE",
                 isPasswordProtected: station?.isPasswordProtected ?? false,
                 crossfadeDuration: station?.crossfadeDuration ?? 3,
-                streamQuality: station?.streamQuality ?? "HIGH",
-                playbackMode: "DIRECT",
               }}
               onBack={() => setContentMode("station")}
               onSaved={(patch) => {
@@ -1081,6 +1081,7 @@ export default function StationPage({
                   audioConnectionState={audioConnectionState}
                   audioConnectionMessage={audioConnectionMessage}
                   audioDiagnostics={audioDiagnostics}
+                  mediaDeliveryInfo={mediaDeliveryInfo}
                   loopMode={loopMode}
                   shuffleEnabled={shuffleEnabled}
                   onPlayPause={handleToggle}

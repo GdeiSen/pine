@@ -1,14 +1,14 @@
-# Observability v2
+# Observability (Direct Mode)
 
-This project now has a standalone observability overlay for the clean-server v2 stack.
+This project has a standalone observability overlay for the direct synchronized playback stack.
 
 ## Included components
 
 - Prometheus scrape config
-- Blackbox probes for HTTP health endpoints and the Icecast stream mount
+- Blackbox probes for HTTP health endpoints
 - PostgreSQL exporter custom queries for playback and queue health
 - Grafana provisioning
-- A dashboard focused on playback, queue, and worker health
+- A dashboard focused on playback, queue, and outbox health
 - Prometheus alert rules for the main failure modes
 
 ## Start it
@@ -18,7 +18,7 @@ From the repository root:
 ```bash
 docker compose \
   --env-file infra/.env \
-  -f infra/docker-compose.v2.yml \
+  -f infra/docker-compose.direct.yml \
   -f infra/observability/docker-compose.observability.yml \
   up -d --build
 ```
@@ -35,20 +35,16 @@ docker compose \
 - API readiness and liveness
 - Web availability
 - MinIO health
-- Icecast root/status/stream mount
 - Playback state heartbeat freshness
-- Pending and processing playback commands
-- Oldest command ages
+- Command processing latency signals (acked/rejected ratio, slow processing samples)
 - Unprocessed playback outbox events
 - Queue pressure
 
 ## Alert semantics
 
 - `PineApiDown`: API readiness is failing.
-- `PineStreamMountDown`: the stream mount is unreachable.
-- `PinePlaybackHeartbeatMissing`: the playback worker has not synchronized playback state recently.
-- `PineWorkerStalled`: a command has been stuck in processing too long.
-- `PineHighCommandBacklog`: pending commands are accumulating.
+- `PinePlaybackHeartbeatMissing`: playback reconciliation has not synchronized state recently.
+- `PineCommandProcessingStalled`: a playback command stayed in `PROCESSING` too long.
 - `PineOutboxBacklog`: playback events are backing up.
 
 ## Notes

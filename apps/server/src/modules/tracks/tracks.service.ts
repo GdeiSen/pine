@@ -18,8 +18,27 @@ import {
   TrackQuality,
   SUPPORTED_AUDIO_FORMATS,
   SUPPORTED_EXTENSIONS,
+  PLAYBACK_QUALITY_PREFERENCES,
   USER_STORAGE_LIMIT_BYTES,
+  type PlaybackQualityPreference,
 } from '@web-radio/shared'
+
+type StreamAsset = {
+  kind: TrackAssetKind
+  objectKey: string
+  mimeType: string
+  byteSize: number | null
+  bitrate: number | null
+  sampleRate: number | null
+  channels: number | null
+  duration: number | null
+}
+
+const MEDIA_DIRECT_URLS_ENABLED = process.env.MEDIA_DIRECT_URLS_ENABLED === '1'
+const MEDIA_DIRECT_URL_TTL_SEC = Math.max(
+  60,
+  Number.parseInt(process.env.MEDIA_DIRECT_URL_TTL_SEC ?? '900', 10),
+)
 
 @Injectable()
 export class TracksService {
@@ -298,26 +317,27 @@ export class TracksService {
     rangeHeader: string | undefined,
     userId?: string,
     ifNoneMatch?: string,
+    requestedQuality?: string,
   ) {
     const track = await this.prisma.track.findUnique({
       where: { id: trackId },
       include: {
-        assets: {
-          where: { kind: TrackAssetKind.ORIGINAL },
-          take: 1,
-        },
+        assets: true,
       },
     })
     if (!track) throw new NotFoundException('Track not found')
     await this.assertStationReadable(track.stationId, userId)
 
-    const objectKey = track.originalPath
-    if (!objectKey) throw new NotFoundException('Track file not found')
+    const qualityPreference = this.normalizePlaybackQualityPreference(requestedQuality)
+    const streamAsset = this.resolveStreamAsset(track, qualityPreference)
+    const scope = this.scopeByAssetKind(streamAsset.kind)
+    if (!scope) {
+      throw new NotFoundException('Track file not found')
+    }
 
-    const mimeType = track.assets[0]?.mimeType ?? 'audio/mpeg'
-    const stat = await this.storageService.getObjectStat('tracks', objectKey).catch(() => null)
-    const totalSize = stat?.size ?? track.fileSize ?? 0
-    const etag = `"track-${track.id}-${track.updatedAt.getTime()}-${totalSize}"`
+    const stat = await this.storageService.getObjectStat(scope, streamAsset.objectKey).catch(() => null)
+    const totalSize = stat?.size ?? streamAsset.byteSize ?? track.fileSize ?? 0
+    const etag = `"track-${track.id}-${streamAsset.kind}-${track.updatedAt.getTime()}-${totalSize}"`
     const cacheControl = 'private, max-age=86400, stale-while-revalidate=604800'
 
     const byteRange = parseSingleByteRange(rangeHeader, totalSize)
@@ -327,6 +347,7 @@ export class TracksService {
         'Accept-Ranges': 'bytes',
         'Cache-Control': cacheControl,
         ETag: etag,
+        'X-Pine-Audio-Variant': streamAsset.kind,
       })
       res.status(416).end()
       return
@@ -337,6 +358,7 @@ export class TracksService {
         'Accept-Ranges': 'bytes',
         'Cache-Control': cacheControl,
         ETag: etag,
+        'X-Pine-Audio-Variant': streamAsset.kind,
       })
       res.status(304).end()
       return
@@ -347,16 +369,17 @@ export class TracksService {
         'Content-Range': `bytes ${byteRange.start}-${byteRange.end}/${totalSize}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': byteRange.length,
-        'Content-Type': mimeType,
+        'Content-Type': streamAsset.mimeType,
         'Cache-Control': cacheControl,
         ETag: etag,
+        'X-Pine-Audio-Variant': streamAsset.kind,
       })
       res.status(206)
 
       try {
         const stream = await this.storageService.getPartialObjectStream(
-          'tracks',
-          objectKey,
+          scope,
+          streamAsset.objectKey,
           byteRange.start,
           byteRange.length,
         )
@@ -369,20 +392,58 @@ export class TracksService {
     }
 
     res.set({
-      'Content-Type': mimeType,
+      'Content-Type': streamAsset.mimeType,
       'Accept-Ranges': 'bytes',
       ...(totalSize > 0 ? { 'Content-Length': totalSize } : {}),
       'Cache-Control': cacheControl,
       ETag: etag,
+      'X-Pine-Audio-Variant': streamAsset.kind,
     })
     res.status(200)
 
     try {
-      const stream = await this.storageService.getObjectStream('tracks', objectKey)
+      const stream = await this.storageService.getObjectStream(scope, streamAsset.objectKey)
       stream.on('error', () => { if (!res.headersSent) res.status(500).end(); else res.end() })
       stream.pipe(res)
     } catch {
       throw new NotFoundException('Track file not found')
+    }
+  }
+
+  async getTrackStreamManifest(trackId: string, userId?: string, requestedQuality?: string) {
+    const track = await this.prisma.track.findUnique({
+      where: { id: trackId },
+      include: { assets: true },
+    })
+    if (!track) throw new NotFoundException('Track not found')
+    await this.assertStationReadable(track.stationId, userId)
+
+    const qualityPreference = this.normalizePlaybackQualityPreference(requestedQuality)
+    const availableAssets = this.collectAvailableStreamAssets(track)
+    const selectedAsset = this.resolveStreamAsset(track, qualityPreference)
+    const directStreamUrl = await this.resolveDirectStreamUrl(selectedAsset)
+    const fallbackStreamUrl = `/api/tracks/${track.id}/stream?quality=${qualityPreference}`
+
+    return {
+      trackId: track.id,
+      stationId: track.stationId,
+      requestedQuality: qualityPreference,
+      selectedAssetKind: selectedAsset.kind,
+      selectedQuality: this.mapAssetKindToQuality(selectedAsset.kind),
+      originalIsLossless: track.quality === TrackQuality.LOSSLESS,
+      hasOriginal: availableAssets.some((asset) => asset.kind === TrackAssetKind.ORIGINAL),
+      availableAssets: availableAssets.map((asset) => ({
+        kind: asset.kind,
+        quality: this.mapAssetKindToQuality(asset.kind),
+        mimeType: asset.mimeType,
+        bitrate: asset.bitrate,
+        sampleRate: asset.sampleRate,
+        channels: asset.channels,
+        duration: asset.duration,
+        byteSize: asset.byteSize,
+      })),
+      streamUrl: directStreamUrl ?? fallbackStreamUrl,
+      deliveryMode: directStreamUrl ? 'DIRECT_MEDIA' : 'API_PROXY',
     }
   }
 
@@ -526,6 +587,182 @@ export class TracksService {
     }
   }
 
+  private normalizePlaybackQualityPreference(value?: string): PlaybackQualityPreference {
+    const normalized = String(value ?? '').trim().toUpperCase()
+    if (
+      (PLAYBACK_QUALITY_PREFERENCES as readonly string[]).includes(normalized)
+    ) {
+      return normalized as PlaybackQualityPreference
+    }
+    return 'AUTO'
+  }
+
+  private mapAssetKindToQuality(kind: TrackAssetKind): PlaybackQualityPreference {
+    switch (kind) {
+      case TrackAssetKind.TRANSCODE_LOW:
+        return 'LOW'
+      case TrackAssetKind.TRANSCODE_MEDIUM:
+        return 'MEDIUM'
+      case TrackAssetKind.TRANSCODE_HIGH:
+        return 'HIGH'
+      case TrackAssetKind.ORIGINAL:
+      default:
+        return 'ORIGINAL'
+    }
+  }
+
+  private getAssetOrderForQualityPreference(
+    preference: PlaybackQualityPreference,
+  ): TrackAssetKind[] {
+    switch (preference) {
+      case 'LOW':
+        return [
+          TrackAssetKind.TRANSCODE_LOW,
+          TrackAssetKind.TRANSCODE_MEDIUM,
+          TrackAssetKind.TRANSCODE_HIGH,
+          TrackAssetKind.ORIGINAL,
+        ]
+      case 'MEDIUM':
+        return [
+          TrackAssetKind.TRANSCODE_MEDIUM,
+          TrackAssetKind.TRANSCODE_HIGH,
+          TrackAssetKind.TRANSCODE_LOW,
+          TrackAssetKind.ORIGINAL,
+        ]
+      case 'HIGH':
+        return [
+          TrackAssetKind.TRANSCODE_HIGH,
+          TrackAssetKind.TRANSCODE_MEDIUM,
+          TrackAssetKind.TRANSCODE_LOW,
+          TrackAssetKind.ORIGINAL,
+        ]
+      case 'ORIGINAL':
+        return [
+          TrackAssetKind.ORIGINAL,
+          TrackAssetKind.TRANSCODE_HIGH,
+          TrackAssetKind.TRANSCODE_MEDIUM,
+          TrackAssetKind.TRANSCODE_LOW,
+        ]
+      case 'AUTO':
+      default:
+        return [
+          TrackAssetKind.TRANSCODE_HIGH,
+          TrackAssetKind.TRANSCODE_MEDIUM,
+          TrackAssetKind.TRANSCODE_LOW,
+          TrackAssetKind.ORIGINAL,
+        ]
+    }
+  }
+
+  private collectAvailableStreamAssets(track: {
+    originalPath: string
+    assets: Array<{
+      kind: TrackAssetKind
+      objectKey: string
+      mimeType: string
+      byteSize: number
+      bitrate: number | null
+      sampleRate: number | null
+      channels: number | null
+      duration: number | null
+    }>
+  }): StreamAsset[] {
+    const byKind = new Map<TrackAssetKind, StreamAsset>()
+
+    for (const asset of track.assets) {
+      if (
+        asset.kind !== TrackAssetKind.ORIGINAL &&
+        asset.kind !== TrackAssetKind.TRANSCODE_LOW &&
+        asset.kind !== TrackAssetKind.TRANSCODE_MEDIUM &&
+        asset.kind !== TrackAssetKind.TRANSCODE_HIGH
+      ) {
+        continue
+      }
+
+      byKind.set(asset.kind, {
+        kind: asset.kind,
+        objectKey: asset.objectKey,
+        mimeType: asset.mimeType || this.getAudioMimeTypeByExt(asset.objectKey, 'audio/mpeg'),
+        byteSize: asset.byteSize ?? null,
+        bitrate: asset.bitrate ?? null,
+        sampleRate: asset.sampleRate ?? null,
+        channels: asset.channels ?? null,
+        duration: asset.duration ?? null,
+      })
+    }
+
+    if (!byKind.has(TrackAssetKind.ORIGINAL) && track.originalPath) {
+      byKind.set(TrackAssetKind.ORIGINAL, {
+        kind: TrackAssetKind.ORIGINAL,
+        objectKey: track.originalPath,
+        mimeType: this.getAudioMimeTypeByExt(track.originalPath, 'audio/mpeg'),
+        byteSize: null,
+        bitrate: null,
+        sampleRate: null,
+        channels: null,
+        duration: null,
+      })
+    }
+
+    return [
+      byKind.get(TrackAssetKind.ORIGINAL),
+      byKind.get(TrackAssetKind.TRANSCODE_HIGH),
+      byKind.get(TrackAssetKind.TRANSCODE_MEDIUM),
+      byKind.get(TrackAssetKind.TRANSCODE_LOW),
+    ].filter((asset): asset is StreamAsset => !!asset)
+  }
+
+  private resolveStreamAsset(
+    track: {
+      originalPath: string
+      assets: Array<{
+        kind: TrackAssetKind
+        objectKey: string
+        mimeType: string
+        byteSize: number
+        bitrate: number | null
+        sampleRate: number | null
+        channels: number | null
+        duration: number | null
+      }>
+    },
+    qualityPreference: PlaybackQualityPreference,
+  ): StreamAsset {
+    const availableAssets = this.collectAvailableStreamAssets(track)
+    if (availableAssets.length === 0) {
+      throw new NotFoundException('Track file not found')
+    }
+
+    const byKind = new Map<TrackAssetKind, StreamAsset>()
+    for (const asset of availableAssets) {
+      byKind.set(asset.kind, asset)
+    }
+
+    const preferredOrder = this.getAssetOrderForQualityPreference(qualityPreference)
+    for (const kind of preferredOrder) {
+      const resolved = byKind.get(kind)
+      if (resolved) return resolved
+    }
+
+    return availableAssets[0]
+  }
+
+  private async resolveDirectStreamUrl(asset: StreamAsset): Promise<string | null> {
+    if (!MEDIA_DIRECT_URLS_ENABLED) return null
+    const scope = this.scopeByAssetKind(asset.kind)
+    if (!scope) return null
+    try {
+      return await this.storageService.presignGetUrl(scope, asset.objectKey, MEDIA_DIRECT_URL_TTL_SEC)
+    } catch (error) {
+      this.logger.warn(
+        `Failed to generate direct media URL for ${asset.objectKey}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+      return null
+    }
+  }
+
   private normalizeMimeType(value?: string | null) {
     return String(value ?? '').trim().toLowerCase()
   }
@@ -600,6 +837,22 @@ export class TracksService {
       '.webp': 'image/webp',
       '.gif': 'image/gif',
       '.bmp': 'image/bmp',
+    }
+    return map[ext] ?? fallback
+  }
+
+  private getAudioMimeTypeByExt(filePath: string, fallback: string) {
+    const ext = path.extname(filePath).toLowerCase()
+    const map: Record<string, string> = {
+      '.mp3': 'audio/mpeg',
+      '.flac': 'audio/flac',
+      '.wav': 'audio/wav',
+      '.aac': 'audio/aac',
+      '.m4a': 'audio/mp4',
+      '.mp4': 'audio/mp4',
+      '.ogg': 'audio/ogg',
+      '.opus': 'audio/opus',
+      '.webm': 'audio/webm',
     }
     return map[ext] ?? fallback
   }

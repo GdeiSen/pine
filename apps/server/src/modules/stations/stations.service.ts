@@ -10,7 +10,6 @@ import * as bcrypt from 'bcryptjs'
 import * as fs from 'fs'
 import * as path from 'path'
 import { v4 as uuid } from 'uuid'
-import { ConfigService } from '@nestjs/config'
 import { PlaybackLoopMode, TrackAssetKind } from '@prisma/client'
 import { PrismaService } from '../../prisma/prisma.service'
 import { CreateStationDto } from './dto/create-station.dto'
@@ -18,7 +17,7 @@ import { UpdateStationDto } from './dto/update-station.dto'
 import { parseSingleByteRange } from '../../common/http-range'
 import { StorageService } from '../storage/storage.service'
 import { StorageScope } from '../storage/storage.config'
-import { StationAccessMode, MemberRole, ROLE_PERMISSIONS, StationPlaybackMode, StreamQuality } from '@web-radio/shared'
+import { StationAccessMode, MemberRole, ROLE_PERMISSIONS } from '@web-radio/shared'
 
 const FALLBACK_STATION_NAME_PHRASES = [
   'Morning Static',
@@ -56,7 +55,6 @@ export class StationsService {
 
   constructor(
     private prisma: PrismaService,
-    private configService: ConfigService,
     private storageService: StorageService,
   ) {}
 
@@ -192,9 +190,7 @@ export class StationsService {
         code: true,
         ownerId: true,
         accessMode: true,
-        playbackMode: true,
         systemQueueMode: true,
-        streamQuality: true,
       },
     })
 
@@ -220,30 +216,17 @@ export class StationsService {
     }
 
     const playback = await this.ensurePlaybackState(station.id, station.systemQueueMode)
-    const playbackMode = this.resolvePlaybackMode(
-      (station.playbackMode as StationPlaybackMode | undefined) ?? StationPlaybackMode.DIRECT,
-    )
     const directTrackPath = playback.currentTrackId
       ? `/api/tracks/${playback.currentTrackId}/stream`
       : ''
-    const { mountPath, streamUrl } =
-      playbackMode === StationPlaybackMode.DIRECT
-        ? {
-            mountPath: directTrackPath,
-            streamUrl: directTrackPath,
-          }
-        : this.buildStreamEndpoints(station.code)
 
     return {
       stationId: station.id,
       code: station.code,
-      streamUrl,
-      mountPath,
-      playbackMode,
+      streamUrl: directTrackPath,
+      playbackMode: 'DIRECT',
       playbackVersion: playback.version,
       serverTime: new Date().toISOString(),
-      qualityHint: station.streamQuality,
-      latencyHintMs: this.estimateLatencyHintMs(station.streamQuality),
       currentTrackId: playback.currentTrackId,
     }
   }
@@ -301,7 +284,6 @@ export class StationsService {
 
   async update(stationId: string, userId: string, dto: UpdateStationDto) {
     const current = await this.assertOwner(stationId, userId)
-    this.assertPlaybackModeAllowed(dto.playbackMode)
     const nextAccessMode = dto.accessMode
       ? this.normalizeAccessMode(dto.accessMode)
       : this.normalizeAccessMode(current.accessMode)
@@ -327,8 +309,6 @@ export class StationsService {
         ...(dto.description !== undefined && { description: dto.description }),
         ...(dto.accessMode && { accessMode: nextAccessMode }),
         ...(dto.crossfadeDuration !== undefined && { crossfadeDuration: dto.crossfadeDuration }),
-        ...(dto.streamQuality && { streamQuality: dto.streamQuality }),
-        ...(dto.playbackMode && { playbackMode: this.resolvePlaybackMode(dto.playbackMode) }),
         ...(passwordHash !== undefined && { passwordHash }),
       },
       include: {
@@ -807,10 +787,7 @@ export class StationsService {
       pausedPosition: playbackState.pausedPosition,
       playbackVersion: playbackState.version ?? 0,
       crossfadeDuration: station.crossfadeDuration,
-      streamQuality: station.streamQuality,
-      playbackMode: this.resolvePlaybackMode(
-        (station.playbackMode as StationPlaybackMode | undefined) ?? StationPlaybackMode.DIRECT,
-      ),
+      playbackMode: 'DIRECT',
       activePlaylistId: station.activePlaylistId,
       listenerCount,
       createdAt: station.createdAt,
@@ -919,97 +896,6 @@ export class StationsService {
     throw new BadRequestException(`Unsupported access mode: ${accessMode}`)
   }
 
-  private resolvePlaybackMode(playbackMode?: StationPlaybackMode | string | null) {
-    void playbackMode
-    return StationPlaybackMode.DIRECT
-  }
-
-  private assertPlaybackModeAllowed(playbackMode?: StationPlaybackMode | null) {
-    if (!playbackMode) return
-    if (playbackMode === StationPlaybackMode.BROADCAST) {
-      throw new BadRequestException('Broadcast mode is no longer supported')
-    }
-  }
-
-  private isDirectOnlyDeployment() {
-    const mode = this.configService.get<string>('APP_DEPLOYMENT_MODE')?.trim().toLowerCase()
-    return mode === 'direct'
-  }
-
-  private buildStreamEndpoints(code: string) {
-    const explicitUrl =
-      this.configService.get<string>('ICECAST_PUBLIC_URL')?.trim() ??
-      this.configService.get<string>('PUBLIC_STREAM_URL_TEMPLATE')?.trim()
-
-    if (explicitUrl) {
-      const replaced = explicitUrl.replaceAll('{code}', code)
-      const isAbsolute = /^https?:\/\//i.test(replaced)
-      const normalizedRelative = replaced.startsWith('/') ? replaced : `/${replaced}`
-
-      if (!isAbsolute) {
-        return {
-          mountPath: normalizedRelative,
-          streamUrl: normalizedRelative,
-        }
-      }
-
-      try {
-        const parsed = new URL(replaced)
-        const clientHost = new URL(this.getClientOrigin()).hostname
-        const explicitHostIsLocal = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
-        const clientHostIsLocal = clientHost === 'localhost' || clientHost === '127.0.0.1'
-        if (explicitHostIsLocal && !clientHostIsLocal) {
-          throw new Error('ignore localhost explicit stream url outside local client host')
-        }
-        return {
-          mountPath: parsed.pathname,
-          streamUrl: replaced,
-        }
-      } catch {
-        // fall through to derived mount below
-      }
-    }
-
-    const icecastMount = this.configService.get<string>('ICECAST_MOUNT')?.trim() ?? '/live.mp3'
-    const mountPath = icecastMount.startsWith('/') ? icecastMount : `/${icecastMount}`
-
-    // In a reverse-proxy setup (web + api on one domain), a relative stream path
-    // is the most resilient default and avoids localhost/public-host mismatches.
-    if (!this.configService.get<string>('ICECAST_HOSTNAME')?.trim()) {
-      return {
-        mountPath,
-        streamUrl: mountPath,
-      }
-    }
-
-    const rawHost =
-      this.configService.get<string>('ICECAST_HOSTNAME')?.trim() ??
-      new URL(this.getClientOrigin()).hostname
-    const protocol = this.configService.get<string>('ICECAST_USE_SSL')?.trim() === 'true'
-      ? 'https'
-      : 'http'
-    const configuredPort = Number.parseInt(this.configService.get<string>('ICECAST_PORT') ?? '8000', 10)
-    const hasPort = /:\d+$/.test(rawHost)
-    const isDefaultPort = (protocol === 'http' && configuredPort === 80) || (protocol === 'https' && configuredPort === 443)
-    const hostWithPort = hasPort || !Number.isFinite(configuredPort) || isDefaultPort
-      ? rawHost
-      : `${rawHost}:${configuredPort}`
-
-    return {
-      mountPath,
-      streamUrl: `${protocol}://${hostWithPort}${mountPath}`,
-    }
-  }
-
-  private getClientOrigin() {
-    const clientUrl = this.configService.get<string>('CLIENT_URL', 'http://localhost:3000')
-    try {
-      return new URL(clientUrl).origin
-    } catch {
-      return clientUrl.replace(/\/+$/, '')
-    }
-  }
-
   private safeDeleteTempFile(filePath: string | undefined) {
     if (!filePath) return
     try {
@@ -1031,18 +917,6 @@ export class StationsService {
     if (ext === '.mov') return 'video/quicktime'
     if (ext === '.m4v') return 'video/x-m4v'
     return fallback
-  }
-
-  private estimateLatencyHintMs(quality: string) {
-    switch (quality) {
-      case StreamQuality.LOW:
-        return 2800
-      case StreamQuality.MEDIUM:
-        return 2200
-      case StreamQuality.HIGH:
-      default:
-        return 1800
-    }
   }
 
   private getPlaybackPosition(playback: {

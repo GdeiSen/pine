@@ -2,68 +2,10 @@ import axios from 'axios'
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 
-export interface StationStreamInfo {
-  stationId: string
-  code: string
-  streamUrl: string
-  mountPath: string
-  playbackMode?: 'DIRECT' | 'BROADCAST'
-  playbackVersion?: number
-  serverTime: string
-  qualityHint: 'LOW' | 'MEDIUM' | 'HIGH'
-  latencyHintMs: number
-  currentTrackId: string | null
-}
-
 export const api = axios.create({
   baseURL: API_URL,
   withCredentials: true,
 })
-
-export async function fetchStationStreamInfo(
-  code: string,
-  includeAuth = false,
-): Promise<StationStreamInfo | null> {
-  try {
-    const headers: Record<string, string> = {
-      Accept: 'application/json',
-    }
-
-    if (includeAuth && typeof window !== 'undefined') {
-      const token = localStorage.getItem('access_token')
-      if (token) {
-        headers.Authorization = `Bearer ${token}`
-      }
-    }
-
-    const response = await fetch(`${API_URL}/stations/${code}/stream-info`, {
-      method: 'GET',
-      cache: 'no-store',
-      credentials: 'include',
-      headers,
-    })
-
-    if (!response.ok) return null
-
-    const data = (await response.json().catch(() => null)) as StationStreamInfo | null
-    if (!data || typeof data.streamUrl !== 'string') return null
-
-    // Docker-local safety: if backend returns relative mount (e.g. /live.mp3),
-    // prefer explicit public stream URL to avoid hitting Next.js (3000) and getting 404.
-    if (data.streamUrl.startsWith('/') && data.playbackMode !== 'DIRECT') {
-      const explicitPublicStream = process.env.NEXT_PUBLIC_STREAM_URL
-      if (explicitPublicStream && /^https?:\/\//i.test(explicitPublicStream)) {
-        data.streamUrl = explicitPublicStream
-      } else if (typeof window !== 'undefined') {
-        data.streamUrl = new URL(data.streamUrl, window.location.origin).toString()
-      }
-    }
-
-    return data
-  } catch {
-    return null
-  }
-}
 
 // Attach token from localStorage
 api.interceptors.request.use((config) => {

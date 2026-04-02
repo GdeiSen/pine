@@ -52,14 +52,6 @@ enum TrackQuality {
   @@map("track_quality")
 }
 
-enum StreamQuality {
-  LOW
-  MEDIUM
-  HIGH
-
-  @@map("stream_quality")
-}
-
 enum TrackStatus {
   UPLOADING
   PROCESSING
@@ -89,7 +81,6 @@ enum SystemQueueMode {
 
 enum StationPlaybackMode {
   DIRECT
-  BROADCAST
 
   @@map("station_playback_mode")
 }
@@ -215,7 +206,6 @@ model Station {
   activePlaylist    Playlist?         @relation("StationActivePlaylist", fields: [activePlaylistId], references: [id], onDelete: SetNull)
   systemQueueMode   SystemQueueMode   @default(SEQUENTIAL)
   crossfadeDuration Int               @default(3)
-  streamQuality     StreamQuality     @default(HIGH)
   playbackMode      StationPlaybackMode @default(DIRECT)
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt

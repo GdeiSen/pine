@@ -11,14 +11,13 @@ import {
 } from '@nestjs/websockets'
 import { Server, Socket } from 'socket.io'
 import { JwtService } from '@nestjs/jwt'
-import { ConfigService } from '@nestjs/config'
 import { Logger } from '@nestjs/common'
 import { PlaybackLoopMode } from '@prisma/client'
 import { PrismaService } from '../../prisma/prisma.service'
 import { QueueService } from '../queue/queue.service'
 import { ChatService } from '../chat/chat.service'
 import { StationsService } from '../stations/stations.service'
-import { WS_EVENTS_V2, ChatMessageType, StationPlaybackMode } from '@web-radio/shared'
+import { WS_EVENTS_V2, ChatMessageType } from '@web-radio/shared'
 import { isAllowedOrigin, resolveAllowedOrigins } from '../../common/security/cors'
 
 interface AuthSocket extends Socket {
@@ -60,7 +59,6 @@ export class StationGateway
 
   constructor(
     private jwtService: JwtService,
-    private configService: ConfigService,
     private prisma: PrismaService,
     private queueService: QueueService,
     private chatService: ChatService,
@@ -79,7 +77,7 @@ export class StationGateway
 
       if (token) {
         const payload = this.jwtService.verify(token, {
-          secret: this.configService.get('JWT_SECRET'),
+          secret: process.env.JWT_SECRET,
         })
         client.userId = payload.sub
         client.username = payload.username
@@ -317,8 +315,7 @@ export class StationGateway
         accessMode: station.accessMode,
         isPasswordProtected: !!station.passwordHash,
         crossfadeDuration: station.crossfadeDuration,
-        streamQuality: station.streamQuality,
-        playbackMode: this.resolvePlaybackMode(station.playbackMode),
+        playbackMode: 'DIRECT',
         activePlaylistId: station.activePlaylistId,
         listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
       },
@@ -407,16 +404,6 @@ export class StationGateway
     if (mode === PlaybackLoopMode.TRACK) return 'track'
     if (mode === PlaybackLoopMode.QUEUE) return 'queue'
     return 'none'
-  }
-
-  private resolvePlaybackMode(playbackMode?: string | null) {
-    void playbackMode
-    return StationPlaybackMode.DIRECT
-  }
-
-  private isDirectOnlyDeployment() {
-    const mode = this.configService.get<string>('APP_DEPLOYMENT_MODE')?.trim().toLowerCase()
-    return mode === 'direct'
   }
 
   private getOnlineUserIds(stationId: string) {

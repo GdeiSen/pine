@@ -3,14 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { PlaybackCommandType, PlaybackEventType, WS_EVENTS_V2 } from '@web-radio/shared'
 import { getSocket } from '@/lib/socket'
-import api, { fetchStationStreamInfo } from '@/lib/api'
+import api from '@/lib/api'
 import { useStationStore } from '@/stores/station.store'
 import { useAudioStore } from '@/stores/audio.store'
-import {
-  getEstimatedServerPosition,
-  normalizeTrackStartedAt,
-  useRadioPlaybackEngine,
-} from './useRadioPlaybackEngine'
+import { getEstimatedServerPosition, normalizeTrackStartedAt } from '@/lib/playback-sync'
 import { useDirectPlaybackEngine } from './useDirectPlaybackEngine'
 
 const TIME_SYNC_INTERVAL_MS = 15_000
@@ -19,8 +15,6 @@ const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
 const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
 const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
-const DIRECT_ONLY_DEPLOYMENT = true
-const DEFAULT_PLAYBACK_MODE = 'DIRECT'
 
 function normalizeLoopMode(value: unknown): 'none' | 'track' | 'queue' {
   if (value === 'track' || value === 'TRACK') return 'track'
@@ -42,7 +36,6 @@ export function useStation(code: string, joinPassword?: string | null) {
   const store = useStationStore()
   const {
     setStation,
-    setStationStreamUrl,
     setPlayback,
     setQueue,
     setMembers,
@@ -53,6 +46,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     reset,
   } = store
   const volume = useAudioStore((s) => s.volume)
+  const playbackQuality = useAudioStore((s) => s.playbackQuality)
   const socket = getSocket()
   const serverOffsetRef = useRef<number | null>(null)
   const bestServerOffsetRef = useRef<{ offsetMs: number; rttMs: number } | null>(null)
@@ -74,27 +68,22 @@ export function useStation(code: string, joinPassword?: string | null) {
     expiresAt: number
   } | null>(null)
 
-  const playbackMode = store.station?.playbackMode ?? DEFAULT_PLAYBACK_MODE
-  const isDirectMode = playbackMode === 'DIRECT'
-  const directPrefetchTrackId = isDirectMode ? (store.queue[0]?.track.id ?? null) : null
-
-  const broadcastEngine = useRadioPlaybackEngine({
-    streamUrl: isDirectMode ? null : store.stationStreamUrl,
-    isPlaying: !isDirectMode && !!store.playback.currentTrack && !store.playback.isPaused,
-    volume,
-  })
+  const playbackMode = 'DIRECT'
+  const isDirectMode = true
+  const directPrefetchTrackId = store.queue[0]?.track.id ?? null
 
   const directEngine = useDirectPlaybackEngine({
-    trackId: isDirectMode ? (store.playback.currentTrack?.id ?? null) : null,
+    trackId: store.playback.currentTrack?.id ?? null,
     prefetchTrackId: directPrefetchTrackId,
-    trackStartedAt: isDirectMode ? store.playback.trackStartedAt : null,
+    trackStartedAt: store.playback.trackStartedAt,
     currentPosition: store.playback.currentPosition,
     isPaused: store.playback.isPaused,
     trackDuration: store.playback.currentTrack?.duration ?? 0,
     volume,
+    playbackQuality,
   })
 
-  const audio = isDirectMode ? directEngine : broadcastEngine
+  const audio = directEngine
   const activeAudioRef = useRef(audio)
   activeAudioRef.current = audio
 
@@ -254,23 +243,6 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     let cancelled = false
 
-    const refreshStreamInfo = async () => {
-      const currentMode = useStationStore.getState().station?.playbackMode
-      if (DIRECT_ONLY_DEPLOYMENT || currentMode === 'DIRECT') {
-        setStationStreamUrl(null)
-        return
-      }
-      const info = await fetchStationStreamInfo(code, true)
-      if (cancelled) return
-      if (info?.playbackMode === 'DIRECT') {
-        setStationStreamUrl(null)
-        return
-      }
-      if (info?.streamUrl) {
-        setStationStreamUrl(info.streamUrl)
-      }
-    }
-
     const refreshStationSnapshot = async () => {
       try {
         const res = await api.get(`/stations/${code}`)
@@ -289,9 +261,6 @@ export function useStation(code: string, joinPassword?: string | null) {
 
         const station = snapshot.station ?? snapshot
         setStation(station as any)
-        if ((station as { playbackMode?: 'DIRECT' | 'BROADCAST' } | null)?.playbackMode === 'DIRECT') {
-          setStationStreamUrl(null)
-        }
         setPlayback({
           version:
             normalizePlaybackVersion(snapshot.version) ??
@@ -313,8 +282,6 @@ export function useStation(code: string, joinPassword?: string | null) {
     }
 
     setConnecting(true)
-    setStationStreamUrl(null)
-    void refreshStreamInfo()
     socket.connect()
 
     const initialSyncTimeout = window.setTimeout(() => {
@@ -383,9 +350,6 @@ export function useStation(code: string, joinPassword?: string | null) {
       setStation(state.station)
       setQueue(state.queue ?? [])
       setMembers(state.members ?? [])
-      if (state.station?.playbackMode === 'DIRECT') {
-        setStationStreamUrl(null)
-      }
       setPlayback({
         ...(incomingVersion !== null ? { version: incomingVersion } : {}),
         currentTrack: state.currentTrack ?? null,
@@ -417,9 +381,6 @@ export function useStation(code: string, joinPassword?: string | null) {
 
       setConnecting(false)
       setConnected(true)
-      if (!useStationStore.getState().stationStreamUrl) {
-        void refreshStreamInfo()
-      }
     }
     socket.on(WS_EVENTS_V2.STATION_STATE, handleStationState)
 
@@ -492,10 +453,6 @@ export function useStation(code: string, joinPassword?: string | null) {
         playPauseIntentRef.current = null
         seekIntentRef.current = null
         pendingTrackSyncRef.current = { trackId: nextTrackId, sinceMs: Date.now() }
-        // BROADCAST mode needs an explicit audio restart; DIRECT mode reloads via trackId change
-        if (stationPlaybackMode !== 'DIRECT') {
-          void activeAudio.restartAudio()
-        }
       } else if (!nextTrackId) {
         pendingTrackSyncRef.current = null
         playPauseIntentRef.current = null
@@ -830,12 +787,6 @@ export function useStation(code: string, joinPassword?: string | null) {
 
     requestTimeSync()
     const timeSync = setInterval(requestTimeSync, TIME_SYNC_INTERVAL_MS)
-    const streamInfoRefresh = setInterval(() => {
-      if (cancelled) return
-      if (useStationStore.getState().station?.playbackMode === 'DIRECT') return
-      void refreshStreamInfo()
-    }, 10_000)
-
     const ticker = setInterval(() => {
       const s = useStationStore.getState()
       const { isPaused, currentTrack, currentPosition } = s.playback
@@ -925,7 +876,6 @@ export function useStation(code: string, joinPassword?: string | null) {
       socket.disconnect()
       clearInterval(heartbeat)
       clearInterval(timeSync)
-      clearInterval(streamInfoRefresh)
       clearInterval(ticker)
       pendingDirectCommandRef.current = null
       reset()
@@ -945,7 +895,6 @@ export function useStation(code: string, joinPassword?: string | null) {
     setPlayback,
     setQueue,
     setStation,
-    setStationStreamUrl,
     socket,
   ])
 
@@ -1118,6 +1067,7 @@ export function useStation(code: string, joinPassword?: string | null) {
     audioConnectionState: audio.audioConnectionState,
     audioConnectionMessage: audio.audioConnectionMessage,
     audioDiagnostics: audio.audioDiagnostics,
+    mediaDeliveryInfo: audio.mediaDeliveryInfo,
     sendPlaybackControl,
     sendChatMessage,
     restartAudio,

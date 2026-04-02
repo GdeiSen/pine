@@ -48,21 +48,6 @@ scrape_configs:
         labels:
           endpoint: minio-live
           service: minio
-      - targets:
-          - http://icecast:8000/
-        labels:
-          endpoint: icecast-root
-          service: icecast
-      - targets:
-          - http://icecast:8000/status-json.xsl
-        labels:
-          endpoint: icecast-status
-          service: icecast
-      - targets:
-          - http://icecast:8000/live.mp3
-        labels:
-          endpoint: stream-mount
-          service: icecast
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

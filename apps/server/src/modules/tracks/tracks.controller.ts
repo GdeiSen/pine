@@ -95,12 +95,24 @@ export class TracksController {
   @SkipThrottle()
   async streamTrack(
     @Param('id', new ParseUUIDPipe()) id: string,
+    @Query('quality') quality: string | undefined,
     @CurrentUser() user: { id: string } | null,
     @Headers('range') rangeHeader: string | undefined,
     @Headers('if-none-match') ifNoneMatch: string | undefined,
     @Res() res: Response,
   ) {
-    return this.tracksService.streamTrack(id, res, rangeHeader, user?.id, ifNoneMatch)
+    return this.tracksService.streamTrack(id, res, rangeHeader, user?.id, ifNoneMatch, quality)
+  }
+
+  @Get('tracks/:id/manifest')
+  @UseGuards(OptionalJwtGuard)
+  @SkipThrottle()
+  async getStreamManifest(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query('quality') quality: string | undefined,
+    @CurrentUser() user: { id: string } | null,
+  ) {
+    return this.tracksService.getTrackStreamManifest(id, user?.id, quality)
   }
 
   @Get('tracks/:id/cover')
