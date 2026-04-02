@@ -8,7 +8,8 @@
     "lint": "turbo run lint",
     "type-check": "turbo run type-check",
     "dev:server": "turbo run dev --filter=@web-radio/server",
-    "dev:web": "turbo run dev --filter=@web-radio/web"
+    "dev:web": "turbo run dev --filter=@web-radio/web",
+    "load:test:group": "bash scripts/load/run-group-listening.sh"
   },
   "devDependencies": {
     "turbo": "^2.8.20",

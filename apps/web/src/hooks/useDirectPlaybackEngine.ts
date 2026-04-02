@@ -26,8 +26,10 @@ const SEEK_FADE_OUT_MS = 220
 const PREFETCH_CLEANUP_DELAY_MS = 1_000
 const TRANSPORT_TRANSITION_MAX_MS = 10_000
 const STREAM_MANIFEST_CACHE_TTL_MS = 5 * 60_000
+const DIRECT_MEDIA_STRICT = process.env.NEXT_PUBLIC_DIRECT_MEDIA_STRICT !== '0'
 
 type DirectTransportPhase = 'idle' | 'pause' | 'track-change' | 'seek'
+type BrowserAudioContext = AudioContext
 
 type UseDirectPlaybackEngineArgs = {
   trackId: string | null
@@ -258,6 +260,23 @@ function clampVolume(value: number) {
   return value
 }
 
+function getAudioContextConstructor(): {
+  new (): BrowserAudioContext
+} | null {
+  if (typeof window === 'undefined') return null
+
+  const ctor =
+    window.AudioContext ??
+    (window as typeof window & {
+      webkitAudioContext?: {
+        new (): BrowserAudioContext
+      }
+    }).webkitAudioContext
+
+  if (typeof ctor !== 'function') return null
+  return ctor as { new (): BrowserAudioContext }
+}
+
 export function useDirectPlaybackEngine({
   trackId,
   prefetchTrackId = null,
@@ -290,6 +309,9 @@ export function useDirectPlaybackEngine({
   const volumeFadeRafRef = useRef<number | null>(null)
   const volumeFadeTokenRef = useRef(0)
   const targetVolumeRef = useRef(clampVolume(volume))
+  const audioContextRef = useRef<BrowserAudioContext | null>(null)
+  const mediaSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null)
+  const gainNodeRef = useRef<GainNode | null>(null)
   const isPausedRef = useRef(isPaused)
   const trackDurationRef = useRef(trackDuration)
   const currentPositionRef = useRef(currentPosition)
@@ -313,6 +335,7 @@ export function useDirectPlaybackEngine({
     >
   >(new Map())
   const trackLoadRequestTokenRef = useRef(0)
+  const playRequestInFlightRef = useRef(false)
   const transportTransitionRef = useRef<{
     token: number
     phase: DirectTransportPhase
@@ -347,6 +370,7 @@ export function useDirectPlaybackEngine({
 
       const fallbackUrl = normalizeMediaUrl(buildStreamUrl(id, normalizedQuality))
       const fallbackDeliveryInfo = buildFallbackDeliveryInfo(normalizedQuality)
+      const strictDirect = DIRECT_MEDIA_STRICT
 
       try {
         const response = await fetch(buildManifestUrl(id, normalizedQuality), {
@@ -357,6 +381,9 @@ export function useDirectPlaybackEngine({
         })
 
         if (!response.ok) {
+          if (strictDirect) {
+            throw new Error(`Manifest request failed with status ${response.status}`)
+          }
           return {
             streamUrl: fallbackUrl,
             deliveryInfo: fallbackDeliveryInfo,
@@ -365,6 +392,9 @@ export function useDirectPlaybackEngine({
 
         const payload = (await response.json().catch(() => null)) as StreamManifestResponse | null
         if (!payload?.streamUrl || typeof payload.streamUrl !== 'string') {
+          if (strictDirect) {
+            throw new Error('Manifest response does not include streamUrl')
+          }
           return {
             streamUrl: fallbackUrl,
             deliveryInfo: fallbackDeliveryInfo,
@@ -375,6 +405,9 @@ export function useDirectPlaybackEngine({
           withAccessToken(resolveStreamUrlCandidate(payload.streamUrl)),
         )
         const deliveryInfo = toMediaDeliveryInfo(payload, normalizedQuality)
+        if (strictDirect && deliveryInfo.deliveryMode === 'API_PROXY') {
+          throw new Error('Strict direct playback is enabled, but manifest resolved API proxy mode')
+        }
         streamManifestCacheRef.current.set(cacheKey, {
           streamUrl: resolved,
           expiresAt: now + STREAM_MANIFEST_CACHE_TTL_MS,
@@ -384,7 +417,10 @@ export function useDirectPlaybackEngine({
           streamUrl: resolved,
           deliveryInfo,
         }
-      } catch {
+      } catch (error) {
+        if (strictDirect) {
+          throw error
+        }
         return {
           streamUrl: fallbackUrl,
           deliveryInfo: fallbackDeliveryInfo,
@@ -422,6 +458,85 @@ export function useDirectPlaybackEngine({
     [setNeedsRestart],
   )
 
+  const teardownGainLayer = useCallback(() => {
+    try {
+      mediaSourceNodeRef.current?.disconnect()
+    } catch {
+      // no-op
+    }
+    try {
+      gainNodeRef.current?.disconnect()
+    } catch {
+      // no-op
+    }
+
+    mediaSourceNodeRef.current = null
+    gainNodeRef.current = null
+
+    const context = audioContextRef.current
+    audioContextRef.current = null
+    if (context) {
+      void context.close().catch(() => undefined)
+    }
+  }, [])
+
+  const readOutputGain = useCallback(() => {
+    const gainNode = gainNodeRef.current
+    if (gainNode) return clampVolume(gainNode.gain.value)
+    const audio = audioRef.current
+    return clampVolume(audio?.volume ?? 1)
+  }, [])
+
+  const setOutputGain = useCallback((target: number) => {
+    const clamped = clampVolume(target)
+    const gainNode = gainNodeRef.current
+    if (gainNode) {
+      gainNode.gain.value = clamped
+      return
+    }
+
+    const audio = audioRef.current
+    if (audio) {
+      audio.volume = clamped
+    }
+  }, [])
+
+  const ensureGainLayer = useCallback(() => {
+    const audio = audioRef.current
+    if (!audio) return false
+
+    if (gainNodeRef.current && mediaSourceNodeRef.current && audioContextRef.current) {
+      audio.volume = 1
+      return true
+    }
+
+    const Ctor = getAudioContextConstructor()
+    if (!Ctor) return false
+
+    try {
+      const context = audioContextRef.current ?? new Ctor()
+      audioContextRef.current = context
+
+      const sourceNode =
+        mediaSourceNodeRef.current ?? context.createMediaElementSource(audio)
+      mediaSourceNodeRef.current = sourceNode
+
+      const gainNode = gainNodeRef.current ?? context.createGain()
+      gainNodeRef.current = gainNode
+
+      sourceNode.disconnect()
+      gainNode.disconnect()
+      sourceNode.connect(gainNode)
+      gainNode.connect(context.destination)
+      gainNode.gain.value = clampVolume(targetVolumeRef.current)
+      audio.volume = 1
+
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
   const stopVolumeFade = useCallback(() => {
     if (volumeFadeRafRef.current !== null) {
       window.cancelAnimationFrame(volumeFadeRafRef.current)
@@ -432,18 +547,17 @@ export function useDirectPlaybackEngine({
 
   const fadeVolumeTo = useCallback(
     (target: number, durationMs: number, onComplete?: () => void) => {
-      const audio = audioRef.current
-      if (!audio) {
+      if (!audioRef.current) {
         onComplete?.()
         return
       }
 
       const clampedTarget = clampVolume(target)
-      const startVolume = clampVolume(audio.volume)
+      const startVolume = readOutputGain()
       const duration = Math.max(0, durationMs)
 
       if (duration <= 0 || Math.abs(startVolume - clampedTarget) < 0.001) {
-        audio.volume = clampedTarget
+        setOutputGain(clampedTarget)
         onComplete?.()
         return
       }
@@ -457,12 +571,11 @@ export function useDirectPlaybackEngine({
 
       const step = (now: number) => {
         if (!mountedRef.current || token !== volumeFadeTokenRef.current) return
-        const currentAudio = audioRef.current
-        if (!currentAudio) return
+        if (!audioRef.current) return
 
         const t = Math.max(0, Math.min(1, (now - startedAt) / duration))
         const eased = 1 - Math.pow(1 - t, 3)
-        currentAudio.volume = clampVolume(
+        setOutputGain(
           startVolume + (clampedTarget - startVolume) * eased,
         )
 
@@ -477,19 +590,18 @@ export function useDirectPlaybackEngine({
 
       volumeFadeRafRef.current = window.requestAnimationFrame(step)
     },
-    [],
+    [readOutputGain, setOutputGain],
   )
 
   const fadeInToTargetVolume = useCallback(() => {
-    const audio = audioRef.current
-    if (!audio) return
+    if (!audioRef.current) return
     const target = targetVolumeRef.current
     if (target <= 0) {
-      audio.volume = 0
+      setOutputGain(0)
       return
     }
     fadeVolumeTo(target, VOLUME_FADE_IN_MS)
-  }, [fadeVolumeTo])
+  }, [fadeVolumeTo, setOutputGain])
 
   const getTargetPosition = useCallback((): number => {
     const liveCurrentPosition = currentPositionRef.current
@@ -674,6 +786,7 @@ export function useDirectPlaybackEngine({
       const audio = audioRef.current
       const desired = desiredStateRef.current
       if (!audio || !desired.trackId || desired.isPaused) return
+      if (playRequestInFlightRef.current) return
 
       if (options?.withResumeGrace) {
         armResumeSyncGrace()
@@ -687,9 +800,14 @@ export function useDirectPlaybackEngine({
         setConnectionStatus('connecting', message)
       }
 
+      playRequestInFlightRef.current = true
       try {
+        const gainLayerReady = ensureGainLayer()
+        if (gainLayerReady) {
+          await audioContextRef.current?.resume().catch(() => undefined)
+        }
         stopVolumeFade()
-        audio.volume = 0
+        setOutputGain(0)
         await audio.play()
         if (!mountedRef.current || token !== playTokenRef.current) return
         fadeInToTargetVolume()
@@ -707,6 +825,8 @@ export function useDirectPlaybackEngine({
           return
         }
         setConnectionStatus('reconnecting', 'Failed to start track')
+      } finally {
+        playRequestInFlightRef.current = false
       }
     },
     [
@@ -715,6 +835,8 @@ export function useDirectPlaybackEngine({
       finishTransportTransition,
       setConnectionStatus,
       setNeedsRestart,
+      ensureGainLayer,
+      setOutputGain,
       stopVolumeFade,
     ],
   )
@@ -747,7 +869,18 @@ export function useDirectPlaybackEngine({
       audio.pause()
 
       const resolvedQuality = playbackQualityRef.current
-      const resolvedSource = await resolveManifestAwareStreamUrl(id, resolvedQuality)
+      let resolvedSource: { streamUrl: string; deliveryInfo: MediaDeliveryInfo }
+      try {
+        resolvedSource = await resolveManifestAwareStreamUrl(id, resolvedQuality)
+      } catch (error) {
+        if (!mountedRef.current || requestToken !== trackLoadRequestTokenRef.current) {
+          return
+        }
+        const errorMessage = error instanceof Error ? error.message : 'Failed to load media manifest'
+        setConnectionStatus('reconnecting', errorMessage)
+        setMediaDeliveryInfo(null)
+        return
+      }
       const url = normalizeMediaUrl(resolvedSource.streamUrl)
 
       if (!mountedRef.current || requestToken !== trackLoadRequestTokenRef.current) {
@@ -774,7 +907,7 @@ export function useDirectPlaybackEngine({
           trackId: id,
           quality: resolvedQuality,
         }
-        audio.volume = 0
+        setOutputGain(0)
         audio.src = url
         audio.preload = 'auto'
         audio.load()
@@ -799,6 +932,14 @@ export function useDirectPlaybackEngine({
         return
       }
 
+      if (sourceChanged) {
+        // Start playback request immediately after assigning src.
+        // Browser will begin output as soon as initial buffer is available.
+        void startPlayback('Loading track...', {
+          suppressConnectingPulse: true,
+        })
+      }
+
       if (sourceChanged || audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) {
         setConnectionStatus('connecting', 'Loading track...')
         return
@@ -811,6 +952,7 @@ export function useDirectPlaybackEngine({
       clearStallRecovery,
       clearTransitionState,
       resolveManifestAwareStreamUrl,
+      setOutputGain,
       setConnectionStatus,
       startPlayback,
       stopVolumeFade,
@@ -832,7 +974,7 @@ export function useDirectPlaybackEngine({
         if (!currentAudio) return
 
         if (!desiredStateRef.current.isPaused) {
-          currentAudio.volume = targetVolumeRef.current
+          setOutputGain(targetVolumeRef.current)
           finishTransportTransition(token)
           return
         }
@@ -842,7 +984,7 @@ export function useDirectPlaybackEngine({
           applyTargetPosition(normalizedTarget, 'strict')
           pendingTargetPositionRef.current = null
         }
-        currentAudio.volume = targetVolumeRef.current
+        setOutputGain(targetVolumeRef.current)
         setConnectionStatus('paused', null)
         finishTransportTransition(token)
       }
@@ -866,6 +1008,7 @@ export function useDirectPlaybackEngine({
       fadeVolumeTo,
       finishTransportTransition,
       isTransportTransitionTokenCurrent,
+      setOutputGain,
       setConnectionStatus,
     ],
   )
@@ -932,7 +1075,7 @@ export function useDirectPlaybackEngine({
         currentAudio.currentTime = normalizedTarget
         pendingTargetPositionRef.current = null
         armResumeSyncGrace()
-        currentAudio.volume = 0
+        setOutputGain(0)
         fadeInToTargetVolume()
         setConnectionStatus('playing', null)
         finishTransportTransition(token)
@@ -949,6 +1092,7 @@ export function useDirectPlaybackEngine({
       fadeVolumeTo,
       finishTransportTransition,
       isTransportTransitionTokenCurrent,
+      setOutputGain,
       setConnectionStatus,
     ],
   )
@@ -1057,9 +1201,9 @@ export function useDirectPlaybackEngine({
     isTransportTransitionActive,
     scheduleStallRecovery,
     setConnectionStatus,
-    startPlayback,
-    stopVolumeFade,
-  })
+      startPlayback,
+      stopVolumeFade,
+    })
 
   useEffect(() => {
     engineCallbacksRef.current = {
@@ -1096,7 +1240,7 @@ export function useDirectPlaybackEngine({
     mountedRef.current = true
     const audio = new Audio()
     audio.preload = 'auto'
-    audio.volume = targetVolumeRef.current
+    audio.volume = 1
     ;(audio as HTMLAudioElement & { playsInline?: boolean }).playsInline = true
     audioRef.current = audio
 
@@ -1139,7 +1283,7 @@ export function useDirectPlaybackEngine({
         engineCallbacksRef.current.setConnectionStatus('paused', null)
         return
       }
-      if (audio.paused) {
+      if (audio.paused && !playRequestInFlightRef.current) {
         void engineCallbacksRef.current.startPlayback('Loading track...')
       }
     }
@@ -1148,6 +1292,7 @@ export function useDirectPlaybackEngine({
       const desired = desiredStateRef.current
       if (!hasExpectedSource()) return
       sourcePlaybackStartedRef.current = true
+      playRequestInFlightRef.current = false
       engineCallbacksRef.current.clearStallRecovery(true)
       const transportPhase = engineCallbacksRef.current.getTransportTransitionPhase()
       if (engineCallbacksRef.current.isTransitionGuardActiveForTrack(desired.trackId)) {
@@ -1178,9 +1323,10 @@ export function useDirectPlaybackEngine({
       const desired = desiredStateRef.current
       const transportPhase = engineCallbacksRef.current.getTransportTransitionPhase()
       if (!desired.trackId || (!desired.isPaused && transportPhase !== 'pause')) return
+      playRequestInFlightRef.current = false
       engineCallbacksRef.current.clearStallRecovery(true)
       alignPendingTarget('strict')
-      audio.volume = targetVolumeRef.current
+      setOutputGain(targetVolumeRef.current)
       engineCallbacksRef.current.setConnectionStatus('paused', null)
       if (transportPhase === 'pause') {
         engineCallbacksRef.current.finishTransportTransition()
@@ -1190,6 +1336,7 @@ export function useDirectPlaybackEngine({
     const onError = () => {
       const desired = desiredStateRef.current
       if (!desired.trackId) return
+      playRequestInFlightRef.current = false
 
       setAudioDiagnostics({
         driftMs: null,
@@ -1231,6 +1378,7 @@ export function useDirectPlaybackEngine({
       audio.removeEventListener('pause', onPause)
       audio.removeEventListener('error', onError)
       audio.pause()
+      playRequestInFlightRef.current = false
       audio.removeAttribute('src')
       audio.load()
       const prefetchedAudio = prefetchAudioRef.current
@@ -1244,6 +1392,7 @@ export function useDirectPlaybackEngine({
       prefetchUrlRef.current = null
       sourceUrlRef.current = null
       sourceDescriptorRef.current = null
+      teardownGainLayer()
       pendingTargetPositionRef.current = null
       engineCallbacksRef.current.finishTransportTransition()
       engineCallbacksRef.current.clearTransitionState()
@@ -1254,7 +1403,7 @@ export function useDirectPlaybackEngine({
         driftTimerRef.current = null
       }
     }
-  }, [])
+  }, [setOutputGain, teardownGainLayer])
 
   // Volume
   useEffect(() => {
@@ -1265,12 +1414,12 @@ export function useDirectPlaybackEngine({
     const target = targetVolumeRef.current
     if (audio.paused || desiredStateRef.current.isPaused) {
       stopVolumeFade()
-      audio.volume = target
+      setOutputGain(target)
       return
     }
 
-    audio.volume = target
-  }, [volume, stopVolumeFade])
+    setOutputGain(target)
+  }, [volume, setOutputGain, stopVolumeFade])
 
   useEffect(() => {
     const nextTrackId = prefetchTrackId?.trim() ?? ''

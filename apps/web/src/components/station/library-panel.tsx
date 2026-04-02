@@ -6,13 +6,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { formatDuration } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { TrackCoverImage } from '@/components/ui/track-cover-image'
+import { buildTrackCoverUrl } from '@/lib/media-url'
 import { UploadModal } from './upload-modal'
 import api from '@/lib/api'
 import {
   Upload, Plus, ChevronDown, Music2, Play, ListMusic, Check, MoreHorizontal,
 } from 'lucide-react'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 
 interface Playlist {
   id: string
@@ -170,7 +170,7 @@ function PlaylistRow({
                 ) : (
                   <div>
                     {tracks.map((track, i) => {
-                      const coverUrl = track.hasCover ? `${API_URL}/tracks/${track.id}/cover` : null
+                      const coverUrl = track.hasCover ? buildTrackCoverUrl(track.id) : null
                       return (
                         <div
                           key={track.id}
@@ -187,13 +187,11 @@ function PlaylistRow({
                                 : "rgba(128, 128, 128, 0.2)",
                             }}
                           >
-                            {coverUrl ? (
-                              <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <div className="w-full h-full flex items-center justify-center">
-                                <Music2 size={11} className="text-[--text-muted]" />
-                              </div>
-                            )}
+                            <TrackCoverImage
+                              src={coverUrl}
+                              fallbackIconSize={11}
+                              fallbackClassName="w-full h-full flex items-center justify-center"
+                            />
                           </div>
                           <div className="flex-1 min-w-0">
                             <p className="text-xs font-medium text-[--text-primary] truncate">{track.title ?? track.id}</p>

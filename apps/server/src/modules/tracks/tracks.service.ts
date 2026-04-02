@@ -3,6 +3,7 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  ServiceUnavailableException,
   Logger,
 } from '@nestjs/common'
 import { TrackAssetKind } from '@prisma/client'
@@ -35,6 +36,7 @@ type StreamAsset = {
 }
 
 const MEDIA_DIRECT_URLS_ENABLED = process.env.MEDIA_DIRECT_URLS_ENABLED === '1'
+const MEDIA_DIRECT_REQUIRED = process.env.MEDIA_DIRECT_REQUIRED !== '0'
 const MEDIA_DIRECT_URL_TTL_SEC = Math.max(
   60,
   Number.parseInt(process.env.MEDIA_DIRECT_URL_TTL_SEC ?? '900', 10),
@@ -424,6 +426,10 @@ export class TracksService {
     const directStreamUrl = await this.resolveDirectStreamUrl(selectedAsset)
     const fallbackStreamUrl = `/api/tracks/${track.id}/stream?quality=${qualityPreference}`
 
+    if (MEDIA_DIRECT_URLS_ENABLED && MEDIA_DIRECT_REQUIRED && !directStreamUrl) {
+      throw new ServiceUnavailableException('Direct media delivery is unavailable')
+    }
+
     return {
       trackId: track.id,
       stationId: track.stationId,
@@ -539,9 +545,6 @@ export class TracksService {
   private async deleteTrackAssets(track: {
     id: string
     originalPath: string
-    highPath: string | null
-    mediumPath: string | null
-    lowPath: string | null
     coverPath: string | null
     assets: Array<{ kind: TrackAssetKind; objectKey: string }>
   }) {
@@ -554,9 +557,6 @@ export class TracksService {
     }
 
     if (track.originalPath) deletions.push({ scope: 'tracks', key: track.originalPath })
-    if (track.highPath) deletions.push({ scope: 'transcodes', key: track.highPath })
-    if (track.mediumPath) deletions.push({ scope: 'transcodes', key: track.mediumPath })
-    if (track.lowPath) deletions.push({ scope: 'transcodes', key: track.lowPath })
     if (track.coverPath) deletions.push({ scope: 'covers', key: track.coverPath })
 
     const unique = new Map<string, { scope: StorageScope; key: string }>()
@@ -759,6 +759,11 @@ export class TracksService {
           error instanceof Error ? error.message : String(error)
         }`,
       )
+      const publicUrl = this.storageService.buildPublicObjectUrl(scope, asset.objectKey)
+      if (publicUrl) {
+        this.logger.warn(`Falling back to public media URL for ${asset.objectKey}`)
+        return publicUrl
+      }
       return null
     }
   }

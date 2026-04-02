@@ -38,6 +38,9 @@ Edit `infra/.env` and set strong secrets at minimum:
 Also set:
 
 - `MINIO_PUBLIC_ENDPOINT` to a browser-reachable MinIO URL (for direct media URLs in manifests)
+- `MEDIA_DIRECT_REQUIRED=1` to disable API proxy fallback in manifest responses
+- `NEXT_PUBLIC_DIRECT_MEDIA_STRICT=1` to keep the web player in strict direct-media mode
+- `PLAYBACK_OUTBOX_ADVISORY_LOCK_KEY=741337` (or another fixed integer) for multi-instance outbox deduplication
 
 ## 3. Build and start all services
 
@@ -149,8 +152,23 @@ k6 run scripts/load/group-listening.k6.js \
   -e SCENARIO=steady
 ```
 
+Or run the helper wrapper (exports summary JSON):
+
+```bash
+BASE_URL=http://localhost \
+STATION_CODE=<station_code> \
+SCENARIO=steady \
+bash scripts/load/run-group-listening.sh
+```
+
 Scenarios:
 
 - `smoke` (short sanity test)
 - `steady` (default baseline)
 - `burst` (high listener pressure)
+
+Baseline pass criteria for direct mode:
+
+- `http_req_failed < 2%`
+- `pine_station_snapshot_latency_ms p95 < 600ms`
+- `pine_manifest_latency_ms p95 < 700ms`

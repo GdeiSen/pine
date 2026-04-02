@@ -20,10 +20,10 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { formatDuration } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
+import { TrackCoverImage } from '@/components/ui/track-cover-image'
 import { GripVertical, Music2 } from 'lucide-react'
+import { buildTrackCoverUrl } from '@/lib/media-url'
 import type { QueueItem } from '@web-radio/shared'
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? '/api'
 
 function SortableQueueItem({
   item,
@@ -44,7 +44,7 @@ function SortableQueueItem({
     opacity: isDragging ? 0.5 : 1,
   }
 
-  const coverUrl = item.track.hasCover ? `${API_URL}/tracks/${item.track.id}/cover` : null
+  const coverUrl = item.track.hasCover ? buildTrackCoverUrl(item.track.id) : null
 
   return (
     <div
@@ -73,13 +73,11 @@ function SortableQueueItem({
           coverUrl ? 'bg-[--bg-subtle]' : 'bg-gray-500/20'
         }`}
       >
-        {coverUrl ? (
-          <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <Music2 size={14} className="text-[--text-muted]" />
-          </div>
-        )}
+        <TrackCoverImage
+          src={coverUrl}
+          fallbackIconSize={14}
+          fallbackClassName="w-full h-full flex items-center justify-center"
+        />
       </div>
 
       <div className="flex-1 min-w-0">

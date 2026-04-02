@@ -1,6 +1,6 @@
 'use client'
 
-import { useRef, useEffect, useCallback } from 'react'
+import { useRef, useEffect, useCallback, type ReactNode } from 'react'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const PX_PER_SEC   = 44      // pixels per second of audio
@@ -81,6 +81,7 @@ interface RulerProgressBarProps {
   isPaused: boolean
   duration: number
   leftMeta?: string | null
+  leftMetaSlot?: ReactNode
   nextTrackHint?: string | null
   onSeek: (pos: number) => void
   interactive?: boolean
@@ -91,6 +92,7 @@ export function RulerProgressBar({
   isPaused,
   duration,
   leftMeta = null,
+  leftMetaSlot = null,
   nextTrackHint = null,
   onSeek,
   interactive = true,
@@ -116,7 +118,6 @@ export function RulerProgressBar({
   } | null>(null)
   const rightTimeRef = useRef<HTMLDivElement | null>(null)
   const leftTimeRef  = useRef<HTMLDivElement | null>(null)
-  const leftMetaRef  = useRef<string | null>(leftMeta)
   const nextTrackHintRef = useRef<string | null>(nextTrackHint)
 
   const ensureAudioCtx = useCallback(() => {
@@ -167,7 +168,6 @@ export function RulerProgressBar({
 
   // Keep props ref in sync
   useEffect(() => { propsRef.current = { currentPosition, isPaused, duration, onSeek } })
-  useEffect(() => { leftMetaRef.current = leftMeta })
   useEffect(() => { nextTrackHintRef.current = nextTrackHint })
 
   // Sync playback position from parent
@@ -376,9 +376,6 @@ export function RulerProgressBar({
       rightTimeRef.current.textContent = ''
     }
 
-    if (leftTimeRef.current) {
-      leftTimeRef.current.textContent = leftMetaRef.current?.trim() ?? ''
-    }
   }, [])
 
   // ── Main RAF loop ──────────────────────────────────────────────────────────
@@ -525,14 +522,28 @@ export function RulerProgressBar({
         className="pointer-events-none absolute inset-y-0 right-0 w-16"
         style={{ background: 'linear-gradient(270deg, var(--bg-elevated) 0%, rgba(0,0,0,0) 100%)' }}
       />
-      <div
-        ref={leftTimeRef}
-        className="pointer-events-none absolute left-0 bottom-[3px] z-20 text-[10px] font-bold tabular-nums truncate max-w-[45%]"
-        style={{
-          color: 'var(--text-muted)',
-          fontFamily: 'ui-monospace, "SF Mono", monospace',
-        }}
-      />
+      {leftMetaSlot ? (
+        <div
+          className="absolute left-0 bottom-[3px] z-20 max-w-[60%]"
+          style={{
+            color: 'var(--text-muted)',
+            fontFamily: 'ui-monospace, "SF Mono", monospace',
+          }}
+        >
+          {leftMetaSlot}
+        </div>
+      ) : leftMeta ? (
+        <div
+          ref={leftTimeRef}
+          className="pointer-events-none absolute left-0 bottom-[3px] z-20 text-[10px] font-bold tabular-nums truncate max-w-[45%]"
+          style={{
+            color: 'var(--text-muted)',
+            fontFamily: 'ui-monospace, "SF Mono", monospace',
+          }}
+        >
+          {leftMeta}
+        </div>
+      ) : null}
       <div
         ref={rightTimeRef}
         className="pointer-events-none absolute right-0 bottom-[3px] z-20 text-[10px] font-bold tabular-nums"

@@ -39,8 +39,10 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
+import { TrackCoverImage } from "@/components/ui/track-cover-image";
 import { formatDuration, formatFileSize } from "@/lib/utils";
 import api from "@/lib/api";
+import { buildTrackCoverUrl } from "@/lib/media-url";
 import { useAuthStore } from "@/stores/auth.store";
 import { SUPPORTED_EXTENSIONS } from "@web-radio/shared";
 
@@ -199,8 +201,6 @@ function createUploadShowcaseCard({
     isNew,
   };
 }
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
 interface Playlist {
   id: string;
@@ -404,7 +404,7 @@ function SortableFolderTrackRow({
   });
 
   const coverUrl = track.hasCover
-    ? `${API_URL}/tracks/${track.id}/cover`
+    ? buildTrackCoverUrl(track.id)
     : null;
   const showCheckbox = canSelect && (isSelected || isHoveringRow);
 
@@ -468,13 +468,11 @@ function SortableFolderTrackRow({
           coverUrl ? "bg-[--bg-subtle]" : "bg-gray-500/20"
         }`}
       >
-        {coverUrl ? (
-          <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <Music2 size={14} className="text-[--text-muted]" />
-          </div>
-        )}
+        <TrackCoverImage
+          src={coverUrl}
+          fallbackIconSize={14}
+          fallbackClassName="w-full h-full flex items-center justify-center"
+        />
       </div>
 
       <div className="flex-1 min-w-0">
@@ -607,13 +605,11 @@ function ActiveFolderArtwork({
               delay: idx * 0.18,
             }}
           >
-            {coverUrl ? (
-              <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-            ) : (
-              <div className="w-full h-full flex items-center justify-center bg-white">
-                <Music2 size={14} className="text-[--text-muted]" />
-              </div>
-            )}
+            <TrackCoverImage
+              src={coverUrl}
+              fallbackIconSize={14}
+              fallbackClassName="w-full h-full flex items-center justify-center bg-white"
+            />
           </motion.div>
         );
       })}
@@ -1191,7 +1187,7 @@ export function AddTracksPanel({
     () =>
       orderedTracks
         .filter((track) => track.hasCover)
-        .map((track) => `${API_URL}/tracks/${track.id}/cover`),
+        .map((track) => buildTrackCoverUrl(track.id)),
     [orderedTracks],
   );
   const activeFolderCoverUrls = useMemo(() => coverPool.slice(0, 3), [coverPool]);
@@ -1226,7 +1222,7 @@ export function AddTracksPanel({
   const appendUploadedShowcaseCard = useCallback(
     (payload: { id: string; hasCover: boolean } | null | undefined) => {
       const imageUrl = payload?.hasCover
-        ? `${API_URL}/tracks/${payload.id}/cover`
+        ? buildTrackCoverUrl(payload.id)
         : null;
 
       setUploadShowcaseCards((prev) => {
@@ -1577,17 +1573,12 @@ export function AddTracksPanel({
                           rotate: card.rotation + card.rotateOffset,
                         }}
                       >
-                        {card.imageUrl ? (
-                          <img
-                            src={card.imageUrl}
-                            alt=""
-                            className="h-full w-full object-cover"
-                          />
-                        ) : (
-                          <div className="flex h-full w-full items-center justify-center bg-white">
-                            <Music2 size={24} className="text-[--text-muted]" />
-                          </div>
-                        )}
+                        <TrackCoverImage
+                          src={card.imageUrl}
+                          imageClassName="h-full w-full object-cover"
+                          fallbackIconSize={24}
+                          fallbackClassName="flex h-full w-full items-center justify-center bg-white"
+                        />
                       </motion.button>
                     ))}
                   </AnimatePresence>

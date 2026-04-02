@@ -2,7 +2,7 @@
 
 ## 1. Document Status
 
-- Status: `PROPOSED`
+- Status: `IMPLEMENTED`
 - Project: `web-radio`
 - Scope: group listening platform refactor for scalable direct-sync playback
 - Last update: `2026-04-02`
@@ -710,36 +710,42 @@ These targets may be refined after real browser profiling.
 - remove remaining runtime legacy around broadcast mode
 - remove dead UI/settings surface
 - freeze one shared playback contract
+- status: DONE (`2026-04-02`)
 
 ## Phase 2 - Media plane separation
 
 - add track asset manifest
 - move playback URLs away from API byte proxy
 - support signed/cacheable direct asset delivery
+- status: DONE (`2026-04-02`)
 
 ## Phase 3 - Real quality ladder
 
 - generate `LOW/MEDIUM/HIGH`
 - store asset metadata per variant
 - make listener quality settings actually affect playback choice
+- status: DONE (`2026-04-02`)
 
 ## Phase 4 - Command path simplification
 
 - move interactive command handling to synchronous transactional API path
 - keep outbox events for realtime broadcast
 - demote old command polling worker path
+- status: DONE (`2026-04-02`)
 
 ## Phase 5 - Client engine finalization
 
 - unify remaining playback engine logic
 - formalize transition coordinator/state machine
 - move fades to dedicated gain layer
+- status: DONE (`2026-04-02`)
 
 ## Phase 6 - Scale and reliability
 
 - add Redis websocket fanout
 - add metrics and dashboards
 - run listener load tests
+- status: DONE (`2026-04-02`)
 
 ---
 

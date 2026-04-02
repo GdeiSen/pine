@@ -93,9 +93,6 @@ export class PlaylistsService {
       select: {
         id: true,
         originalPath: true,
-        highPath: true,
-        mediumPath: true,
-        lowPath: true,
         coverPath: true,
         assets: {
           select: {
@@ -193,9 +190,6 @@ export class PlaylistsService {
 
   private async deleteTrackObjects(track: {
     originalPath: string
-    highPath: string | null
-    mediumPath: string | null
-    lowPath: string | null
     coverPath: string | null
     assets: Array<{ kind: TrackAssetKind; objectKey: string }>
   }) {
@@ -208,9 +202,6 @@ export class PlaylistsService {
     }
 
     if (track.originalPath) deletions.push({ scope: 'tracks', key: track.originalPath })
-    if (track.highPath) deletions.push({ scope: 'transcodes', key: track.highPath })
-    if (track.mediumPath) deletions.push({ scope: 'transcodes', key: track.mediumPath })
-    if (track.lowPath) deletions.push({ scope: 'transcodes', key: track.lowPath })
     if (track.coverPath) deletions.push({ scope: 'covers', key: track.coverPath })
 
     await Promise.all(

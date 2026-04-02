@@ -33,6 +33,26 @@ export class StorageService {
     return this.rewritePresignedUrlForPublicAccess(presigned)
   }
 
+  buildPublicObjectUrl(scope: StorageScope, key: string) {
+    if (!this.minioPublicEndpoint) return null
+    try {
+      const base = new URL(this.minioPublicEndpoint)
+      const bucket = resolveBucketByScope(scope, this.buckets)
+      const keyPath = key
+        .split('/')
+        .filter(Boolean)
+        .map((segment) => encodeURIComponent(segment))
+        .join('/')
+      const basePath = base.pathname.endsWith('/')
+        ? base.pathname.slice(0, -1)
+        : base.pathname
+      const objectPath = `${basePath}/${bucket}/${keyPath}`.replace(/\/{2,}/g, '/')
+      return `${base.protocol}//${base.host}${objectPath}`
+    } catch {
+      return null
+    }
+  }
+
   async uploadBuffer(
     scope: StorageScope,
     key: string,

@@ -6,25 +6,11 @@ import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import api from "@/lib/api";
 import { useAuthStore } from "@/stores/auth.store";
-import { useAudioStore } from "@/stores/audio.store";
 import { getAvatarFallback, formatFileSize } from "@/lib/utils";
-import type { PlaybackQualityPreference } from "@web-radio/shared";
 
 interface UserSettingsPanelProps {
   onBack: () => void;
 }
-
-const PLAYBACK_QUALITY_OPTIONS: Array<{
-  value: PlaybackQualityPreference;
-  label: string;
-  hint: string;
-}> = [
-  { value: "AUTO", label: "Auto", hint: "Best available playback for this browser" },
-  { value: "LOW", label: "Low", hint: "Lower bandwidth, mobile-friendly" },
-  { value: "MEDIUM", label: "Medium", hint: "Balanced quality and data usage" },
-  { value: "HIGH", label: "High", hint: "Higher quality lossy playback" },
-  { value: "ORIGINAL", label: "Original", hint: "Use source file when supported" },
-];
 
 function resolveApiErrorMessage(err: any, fallback: string) {
   const message = err?.response?.data?.message;
@@ -36,8 +22,6 @@ function resolveApiErrorMessage(err: any, fallback: string) {
 export function UserSettingsPanel({ onBack }: UserSettingsPanelProps) {
   const user = useAuthStore((s) => s.user);
   const refreshUser = useAuthStore((s) => s.refreshUser);
-  const playbackQuality = useAudioStore((s) => s.playbackQuality);
-  const setPlaybackQuality = useAudioStore((s) => s.setPlaybackQuality);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const [nickname, setNickname] = useState(user?.username ?? "");
@@ -238,36 +222,6 @@ export function UserSettingsPanel({ onBack }: UserSettingsPanelProps) {
 
       <div className="flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-7">
         <motion.section initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-          <div className="flex items-center gap-2 mb-6">
-            <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
-              Playback
-            </p>
-          </div>
-          <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
-            This quality preference applies only to your player and does not change playback for other listeners.
-          </p>
-
-          <div className="flex flex-wrap gap-2 mb-8">
-            {PLAYBACK_QUALITY_OPTIONS.map((option) => {
-              const isActive = playbackQuality === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setPlaybackQuality(option.value)}
-                  className="w-[170px] min-h-[84px] rounded-xl p-3 text-left transition-colors"
-                  style={{
-                    background: isActive ? "var(--bg-inset)" : "var(--bg-elevated)",
-                    border: `2px solid ${isActive ? "var(--color-accent)" : "var(--border)"}`,
-                  }}
-                >
-                  <p className="text-sm font-semibold text-[--text-primary]">{option.label}</p>
-                  <p className="text-[10px] text-[--text-muted] mt-1 leading-tight">{option.hint}</p>
-                </button>
-              );
-            })}
-          </div>
-
           <div className="flex items-center gap-2 mb-6">
             <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
               Password

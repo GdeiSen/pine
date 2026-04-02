@@ -10,10 +10,23 @@ import {
 } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { ArrowLeft, Lock, Hash, Globe2, X } from "lucide-react";
+import {
+  ArrowLeft,
+  Lock,
+  Hash,
+  Globe2,
+  X,
+  Sparkles,
+  ArrowDown,
+  Radio,
+  ArrowUp,
+  ShieldCheck,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmModal } from "@/components/ui/confirm-modal";
 import api from "@/lib/api";
+import { useAudioStore } from "@/stores/audio.store";
+import type { PlaybackQualityPreference } from "@web-radio/shared";
 
 type AccessMode = "PUBLIC" | "PRIVATE";
 
@@ -54,12 +67,52 @@ const ACCESS_OPTIONS: Array<{
   },
 ];
 
+const PLAYBACK_QUALITY_OPTIONS: Array<{
+  value: PlaybackQualityPreference;
+  label: string;
+  hint: string;
+  icon: ReactNode;
+}> = [
+  {
+    value: "AUTO",
+    label: "Auto",
+    hint: "Best available for this device",
+    icon: <Sparkles size={16} />,
+  },
+  {
+    value: "LOW",
+    label: "Low",
+    hint: "Lower bandwidth usage",
+    icon: <ArrowDown size={16} />,
+  },
+  {
+    value: "MEDIUM",
+    label: "Medium",
+    hint: "Balanced quality",
+    icon: <Radio size={16} />,
+  },
+  {
+    value: "HIGH",
+    label: "High",
+    hint: "Higher quality lossy stream",
+    icon: <ArrowUp size={16} />,
+  },
+  {
+    value: "ORIGINAL",
+    label: "Original",
+    hint: "Prefer source quality",
+    icon: <ShieldCheck size={16} />,
+  },
+];
+
 export function SettingsPanel({
   station,
   onBack,
   onSaved,
 }: SettingsPanelProps) {
   const router = useRouter();
+  const playbackQuality = useAudioStore((s) => s.playbackQuality);
+  const setPlaybackQuality = useAudioStore((s) => s.setPlaybackQuality);
   const stationCoverInputRef = useRef<HTMLInputElement | null>(null);
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   const [name, setName] = useState(station.name);
@@ -389,6 +442,58 @@ export function SettingsPanel({
                   />
                 </div>
               </button>
+            </div>
+          </motion.section>
+
+          <motion.section
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.08 }}
+          >
+            <div className="flex items-center gap-2 mb-6">
+              <p className="text-4xl font-black text-[--text-primary] tracking-tight leading-none">
+                Playback
+              </p>
+            </div>
+            <p className="-mt-3 mb-5 text-sm text-[--text-muted]">
+              Select preferred stream quality for this browser player.
+            </p>
+            <div className="flex flex-wrap gap-2 items-stretch">
+              {PLAYBACK_QUALITY_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setPlaybackQuality(opt.value)}
+                  className="w-[138px] h-[122px] rounded-xl p-3 transition-colors text-left shrink-0 flex flex-col justify-between"
+                  style={{
+                    background:
+                      playbackQuality === opt.value
+                        ? isDarkTheme
+                          ? "var(--bg-inset)"
+                          : "rgba(255,255,255,0.92)"
+                        : isDarkTheme
+                          ? "rgba(255,255,255,0.07)"
+                          : "rgba(0,0,0,0.06)",
+                    border: `2px solid ${
+                      playbackQuality === opt.value
+                        ? isDarkTheme
+                          ? "var(--color-accent)"
+                          : "rgba(24,23,15,0.55)"
+                        : "var(--border)"
+                    }`,
+                  }}
+                >
+                  <div className="text-[--text-primary]">{opt.icon}</div>
+                  <div>
+                    <p className="text-sm font-semibold text-[--text-primary] leading-tight">
+                      {opt.label}
+                    </p>
+                    <p className="text-[10px] text-[--text-muted] mt-1 leading-tight">
+                      {opt.hint}
+                    </p>
+                  </div>
+                </button>
+              ))}
             </div>
           </motion.section>
 

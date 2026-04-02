@@ -185,30 +185,30 @@ model RefreshToken {
 // ─── Station ──────────────────────────────────────────────────────────────────
 
 model Station {
-  id                String            @id @default(uuid())
-  code              String            @unique
+  id                String              @id @default(uuid())
+  code              String              @unique
   name              String
   description       String?
   coverImage        String?
-  previewVideoKeys  String[]          @default([])
+  previewVideoKeys  String[]            @default([])
   ownerId           String
-  owner             User              @relation("StationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  accessMode        StationAccessMode @default(PRIVATE)
+  owner             User                @relation("StationOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  accessMode        StationAccessMode   @default(PRIVATE)
   passwordHash      String?
-  isLive            Boolean           @default(false)
+  isLive            Boolean             @default(false)
   currentTrackId    String?
-  currentTrack      Track?            @relation("StationCurrentTrack", fields: [currentTrackId], references: [id], onDelete: SetNull)
-  currentPosition   Float             @default(0)
+  currentTrack      Track?              @relation("StationCurrentTrack", fields: [currentTrackId], references: [id], onDelete: SetNull)
+  currentPosition   Float               @default(0)
   trackStartedAt    DateTime?
-  isPaused          Boolean           @default(false)
-  pausedPosition    Float             @default(0)
+  isPaused          Boolean             @default(false)
+  pausedPosition    Float               @default(0)
   activePlaylistId  String?
-  activePlaylist    Playlist?         @relation("StationActivePlaylist", fields: [activePlaylistId], references: [id], onDelete: SetNull)
-  systemQueueMode   SystemQueueMode   @default(SEQUENTIAL)
-  crossfadeDuration Int               @default(3)
+  activePlaylist    Playlist?           @relation("StationActivePlaylist", fields: [activePlaylistId], references: [id], onDelete: SetNull)
+  systemQueueMode   SystemQueueMode     @default(SEQUENTIAL)
+  crossfadeDuration Int                 @default(3)
   playbackMode      StationPlaybackMode @default(DIRECT)
-  createdAt         DateTime          @default(now())
-  updatedAt         DateTime          @updatedAt
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
 
   tracks           Track[]           @relation("StationTracks")
   playlists        Playlist[]        @relation("StationPlaylists")
@@ -259,9 +259,6 @@ model Track {
   uploadedBy   User         @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
   filename     String
   originalPath String
-  highPath     String?
-  mediumPath   String?
-  lowPath      String?
   coverPath    String?
   title        String?
   artist       String?
@@ -500,6 +497,7 @@ model PlaybackEvent {
   processedAt DateTime?
 
   @@index([stationId, createdAt])
+  @@index([processedAt, createdAt])
   @@index([commandId])
   @@map("playback_events")
 }

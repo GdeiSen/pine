@@ -24,7 +24,9 @@ import { CSS } from "@dnd-kit/utilities";
 import { formatDuration } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { TrackCoverImage } from "@/components/ui/track-cover-image";
 import api from "@/lib/api";
+import { buildTrackCoverUrl } from "@/lib/media-url";
 import type { QueueItem } from "@web-radio/shared";
 import {
   GripVertical,
@@ -40,8 +42,6 @@ import {
   X,
   Check,
 } from "lucide-react";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
 function getApiErrorMessage(error: unknown, fallback: string) {
   const message = (error as any)?.response?.data?.message;
@@ -227,13 +227,11 @@ function FolderArtwork({
               exit={{ opacity: 0, y: t.y + 4, x: t.x, rotate: t.rotate }}
               transition={{ duration: 0.22, ease: "easeOut", delay: idx * 0.03 }}
             >
-              {coverUrl ? (
-                <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <div className="w-full h-full flex items-center justify-center bg-white">
-                  <Music2 size={11} className="text-[--text-muted]" />
-                </div>
-              )}
+              <TrackCoverImage
+                src={coverUrl}
+                fallbackIconSize={11}
+                fallbackClassName="w-full h-full flex items-center justify-center bg-white"
+              />
             </motion.div>
           );
         })}
@@ -464,7 +462,7 @@ function SortableQueueRow({
   });
 
   const coverUrl = item.track.hasCover
-    ? `${API_URL}/tracks/${item.track.id}/cover`
+    ? buildTrackCoverUrl(item.track.id)
     : null;
 
   return (
@@ -495,13 +493,11 @@ function SortableQueueRow({
           coverUrl ? "bg-[--bg-subtle]" : "bg-gray-500/20"
         }`}
       >
-        {coverUrl ? (
-          <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <Music2 size={14} className="text-[--text-muted]" />
-          </div>
-        )}
+        <TrackCoverImage
+          src={coverUrl}
+          fallbackIconSize={14}
+          fallbackClassName="w-full h-full flex items-center justify-center"
+        />
       </div>
 
       <div className="flex-1 min-w-0">
@@ -669,7 +665,7 @@ function SortableLibraryRow({
   });
 
   const coverUrl = track.hasCover
-    ? `${API_URL}/tracks/${track.id}/cover`
+    ? buildTrackCoverUrl(track.id)
     : null;
   const showCheckbox = canSelect && (isSelected || isHoveringRow);
 
@@ -742,13 +738,11 @@ function SortableLibraryRow({
           coverUrl ? "bg-[--bg-subtle]" : "bg-gray-500/20"
         }`}
       >
-        {coverUrl ? (
-          <img src={coverUrl} alt="" className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <Music2 size={14} className="text-[--text-muted]" />
-          </div>
-        )}
+        <TrackCoverImage
+          src={coverUrl}
+          fallbackIconSize={14}
+          fallbackClassName="w-full h-full flex items-center justify-center"
+        />
       </div>
 
       <div className="flex-1 min-w-0">
@@ -887,7 +881,7 @@ export function QueueLibraryPanel({
       playlistTracks
         .filter((track) => track.hasCover)
         .slice(0, 3)
-        .map((track) => `${API_URL}/tracks/${track.id}/cover`),
+        .map((track) => buildTrackCoverUrl(track.id)),
     [playlistTracks],
   );
 

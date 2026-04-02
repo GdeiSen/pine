@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { RulerProgressBar } from "@/components/station/ruler-progress";
+import { TrackCoverImage } from "@/components/ui/track-cover-image";
+import { buildTrackCoverUrl } from "@/lib/media-url";
 import {
   SkipBack,
   SkipForward,
@@ -14,9 +16,9 @@ import {
   Music2,
   RotateCw,
   Loader2,
+  CircleHelp,
 } from "lucide-react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 const AUDIO_DEBUG_ENABLED =
   process.env.NEXT_PUBLIC_AUDIO_DEBUG === "1" ||
   process.env.NEXT_PUBLIC_AUDIO_DEBUG === "true";
@@ -38,73 +40,29 @@ const SOFT_FADE_FAST_TRANSITION = {
   ease: [0.19, 1, 0.22, 1] as const,
 };
 
-function getTrackFormatLabel(filename?: string | null, quality?: string | null) {
-  const extension = filename?.trim().split(".").pop()?.trim().toLowerCase() ?? "";
-  switch (extension) {
-    case "mp3":
-      return "MP3";
-    case "flac":
-      return "FLAC";
-    case "wav":
-      return "WAV";
-    case "m4a":
-      return "M4A";
-    case "aac":
-      return "AAC";
-    case "ogg":
-      return "OGG";
-    case "opus":
-      return "OPUS";
-    default:
-      return quality === "LOSSLESS" ? "LOSSLESS" : null;
+function formatLagLabel(driftMs: number | null | undefined) {
+  if (typeof driftMs !== "number" || !Number.isFinite(driftMs)) {
+    return "Lag —";
   }
+  const lagMs = Math.max(0, Math.round(-driftMs));
+  if (lagMs >= 1000) {
+    return `Lag ${(lagMs / 1000).toFixed(2)}s`;
+  }
+  return `Lag ${lagMs}ms`;
 }
 
-function getTrackFormatLabelFromMimeType(mimeType?: string | null) {
-  const normalized = String(mimeType ?? "").trim().toLowerCase();
-  switch (normalized) {
-    case "audio/mpeg":
-      return "MP3";
-    case "audio/flac":
-    case "audio/x-flac":
-      return "FLAC";
-    case "audio/wav":
-    case "audio/x-wav":
-      return "WAV";
-    case "audio/mp4":
-    case "audio/aac":
-    case "audio/x-m4a":
-      return "M4A";
-    case "audio/ogg":
-      return "OGG";
-    case "audio/opus":
-      return "OPUS";
-    case "audio/webm":
-      return "WEBM";
-    default:
-      return null;
+function describeDrift(driftMs: number | null | undefined) {
+  if (typeof driftMs !== "number" || !Number.isFinite(driftMs)) {
+    return "The player has not collected enough sync data yet.";
   }
-}
-
-function getTrackDeliveryLabel(args: { bitrate?: number | null; quality?: string | null }) {
-  if (args.quality === "LOSSLESS") {
-    return "Lossless";
+  const rounded = Math.round(driftMs);
+  if (rounded < 0) {
+    return `Your player is behind the station timeline by ${Math.abs(rounded)} ms.`;
   }
-  if (typeof args.bitrate === "number" && Number.isFinite(args.bitrate) && args.bitrate > 0) {
-    return `${Math.max(1, Math.round(args.bitrate))} kbps`;
+  if (rounded > 0) {
+    return `Your player is ahead of the station timeline by ${rounded} ms.`;
   }
-  switch (args.quality) {
-    case "HIGH":
-      return "High quality";
-    case "MEDIUM":
-      return "Medium quality";
-    case "LOW":
-      return "Low quality";
-    case "ORIGINAL":
-      return "Original quality";
-    default:
-      return null;
-  }
+  return "Your player is synchronized with the station timeline.";
 }
 
 type LoopMode = "none" | "track" | "queue";
@@ -185,7 +143,6 @@ export function TrackInfo({
   audioConnectionState,
   audioConnectionMessage,
   audioDiagnostics,
-  mediaDeliveryInfo = null,
   loopMode,
   shuffleEnabled,
   onPlayPause,
@@ -198,55 +155,11 @@ export function TrackInfo({
   onToggleLoop,
   onToggleShuffle,
 }: TrackInfoProps) {
-  const coverUrl = track?.hasCover
-    ? `${API_URL}/tracks/${track.id}/cover`
-    : null;
-  const [resolvedCoverUrl, setResolvedCoverUrl] = useState<string | null>(null);
+  const coverUrl = track?.hasCover ? buildTrackCoverUrl(track.id) : null;
   const [showLoadingOverlay, setShowLoadingOverlay] = useState(false);
   const [showSlowLoadingNotice, setShowSlowLoadingNotice] = useState(false);
+  const [isLagHelpOpen, setIsLagHelpOpen] = useState(false);
   const loadingVisibleSinceRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (!coverUrl) {
-      setResolvedCoverUrl(null);
-      return;
-    }
-
-    const controller = new AbortController();
-    let objectUrl: string | null = null;
-
-    const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
-    const headers: Record<string, string> = {};
-    if (token) headers.Authorization = `Bearer ${token}`;
-
-    fetch(coverUrl, {
-      method: "GET",
-      credentials: "include",
-      headers,
-      signal: controller.signal,
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`cover ${response.status}`);
-        return response.blob();
-      })
-      .then((blob) => {
-        if (controller.signal.aborted) return;
-        objectUrl = URL.createObjectURL(blob);
-        setResolvedCoverUrl(objectUrl);
-      })
-      .catch(() => {
-        if (controller.signal.aborted) return;
-        setResolvedCoverUrl(coverUrl);
-      });
-
-    return () => {
-      controller.abort();
-      if (objectUrl) {
-        const staleObjectUrl = objectUrl;
-        window.setTimeout(() => URL.revokeObjectURL(staleObjectUrl), 1500);
-      }
-    };
-  }, [coverUrl, track?.id]);
 
   const isActive = isPlaying && !isPaused;
   const timelineDuration =
@@ -276,22 +189,8 @@ export function TrackInfo({
     }
     return "Checking player state and preparing playback.";
   })();
-  const trackFormatLabel =
-    getTrackFormatLabelFromMimeType(mediaDeliveryInfo?.selectedMimeType) ??
-    getTrackFormatLabel(track?.filename, track?.quality);
-  const trackDeliveryLabel = getTrackDeliveryLabel({
-    bitrate: mediaDeliveryInfo?.selectedBitrate ?? track?.bitrate,
-    quality: mediaDeliveryInfo?.selectedQuality ?? track?.quality,
-  });
-  const deliveryModeLabel =
-    mediaDeliveryInfo?.deliveryMode === "DIRECT_MEDIA"
-      ? "Direct"
-      : mediaDeliveryInfo?.deliveryMode === "API_PROXY"
-        ? "Proxy"
-        : null;
-  const leftMeta = [trackFormatLabel, trackDeliveryLabel, deliveryModeLabel]
-    .filter(Boolean)
-    .join(" · ");
+  const lagLabel = formatLagLabel(audioDiagnostics?.driftMs);
+  const driftDescription = describeDrift(audioDiagnostics?.driftMs);
   const albumYearLabel = [track?.album, track?.year].filter(Boolean).join(" · ");
   const genreLabel = track?.genre?.trim() ?? "";
   const hasAlbumYear = albumYearLabel.length > 0;
@@ -339,6 +238,15 @@ export function TrackInfo({
     return () => window.clearTimeout(timer);
   }, [isLoadingState, showLoadingOverlay, showTransportBanner, track?.id]);
 
+  useEffect(() => {
+    if (!isLagHelpOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsLagHelpOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [isLagHelpOpen]);
+
   return (
     <motion.div
       layout
@@ -384,11 +292,7 @@ export function TrackInfo({
             }`}
           >
             {coverUrl ? (
-              <img
-                src={resolvedCoverUrl ?? coverUrl}
-                alt=""
-                className="w-full h-full object-cover"
-              />
+              <TrackCoverImage src={coverUrl} imageClassName="w-full h-full object-cover" />
             ) : (
               <div className="w-full h-full flex items-center justify-center">
                 <Music2 size={24} className="text-[--text-muted]" />
@@ -520,7 +424,27 @@ export function TrackInfo({
               isPaused={isPaused}
               duration={timelineDuration}
               nextTrackHint={nextTrackHint}
-              leftMeta={leftMeta || null}
+              leftMetaSlot={
+                <div className="pointer-events-none flex items-center gap-1.5 pr-2">
+                  <span className="text-[10px] font-bold tabular-nums truncate">
+                    {lagLabel}
+                  </span>
+                  <button
+                    type="button"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setIsLagHelpOpen(true);
+                    }}
+                    className="pointer-events-auto h-4 w-4 rounded-full flex items-center justify-center transition-colors hover:text-[--text-primary]"
+                    style={{ color: "var(--text-muted)" }}
+                    aria-label="What is lag?"
+                    title="What is lag?"
+                  >
+                    <CircleHelp size={11} />
+                  </button>
+                </div>
+              }
               onSeek={onSeek}
               interactive={progressInteractive}
             />
@@ -658,6 +582,75 @@ export function TrackInfo({
               </div>
             )}
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isLagHelpOpen && (
+          <div className="fixed inset-0 z-[140] flex items-center justify-center p-4">
+            <motion.button
+              type="button"
+              aria-label="Close lag help"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0"
+              style={{
+                background: "rgba(0,0,0,0.5)",
+                backdropFilter: "blur(4px)",
+              }}
+              onClick={() => setIsLagHelpOpen(false)}
+            />
+
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              initial={{ opacity: 0, scale: 0.96, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 10 }}
+              transition={{ duration: 0.16 }}
+              className="relative z-10 w-full max-w-md rounded-2xl p-5"
+              style={{
+                background: "var(--bg-elevated)",
+                border: "1px solid var(--border)",
+                boxShadow: "var(--shadow-lg)",
+              }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <p className="text-base font-semibold text-[--text-primary]">Playback lag</p>
+              <p className="mt-2 text-sm text-[--text-muted]">
+                Lag shows how far local playback is from the station timeline. Small values are
+                normal and usually inaudible.
+              </p>
+              <p className="mt-2 text-sm text-[--text-muted]">{driftDescription}</p>
+
+              <div className="mt-5 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  className="h-9 px-3 rounded-lg text-sm"
+                  style={{
+                    border: "1px solid var(--border)",
+                    color: "var(--text-primary)",
+                    background: "var(--bg)",
+                  }}
+                  onClick={() => setIsLagHelpOpen(false)}
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  className="h-9 px-3 rounded-lg text-sm font-semibold text-white"
+                  style={{ background: "var(--color-accent)" }}
+                  onClick={() => {
+                    setIsLagHelpOpen(false);
+                    onRestartAudio();
+                  }}
+                >
+                  Sync now
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
     </motion.div>

@@ -18,6 +18,10 @@ type PlaybackEventRow = {
 
 const POLL_INTERVAL_MS = Number.parseInt(process.env.PLAYBACK_OUTBOX_POLL_INTERVAL_MS ?? '100', 10)
 const BATCH_SIZE = Number.parseInt(process.env.PLAYBACK_OUTBOX_BATCH_SIZE ?? '100', 10)
+const PLAYBACK_OUTBOX_ADVISORY_LOCK_KEY = Number.parseInt(
+  process.env.PLAYBACK_OUTBOX_ADVISORY_LOCK_KEY ?? '741337',
+  10,
+)
 
 function toClientLoopMode(value: unknown) {
   if (value === PlaybackLoopMode.TRACK || value === 'TRACK' || value === 'track') return 'track'
@@ -65,34 +69,43 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
     this.running = true
 
     try {
-      const events = await this.prisma.playbackEvent.findMany({
-        where: { processedAt: null },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        take: Math.max(1, Math.min(BATCH_SIZE, 100)),
-      })
-
-      if (events.length === 0) return
       if (!this.stationGateway.server) {
         this.logger.warn('Station gateway is not ready yet, delaying playback outbox flush')
         return
       }
 
-      for (const event of events) {
-        const envelope = await this.buildEnvelope(event)
-        const wsEvent = this.mapWsEvent(event.type)
+      await this.prisma.$transaction(async (tx) => {
+        const lockRows = await tx.$queryRaw<Array<{ locked: boolean }>>`
+          SELECT pg_try_advisory_xact_lock(${PLAYBACK_OUTBOX_ADVISORY_LOCK_KEY}) AS locked
+        `
+        const lockAcquired = lockRows[0]?.locked === true
+        if (!lockAcquired) return
 
-        try {
-          this.stationGateway.broadcastToStation(event.stationId, wsEvent, envelope)
-          await this.prisma.playbackEvent.update({
-            where: { id: event.id },
-            data: { processedAt: new Date() },
-          })
-        } catch (error) {
-          this.logger.error(
-            `Failed to broadcast playback event ${event.id} (${event.type}): ${this.describeError(error)}`,
-          )
+        const events = await tx.playbackEvent.findMany({
+          where: { processedAt: null },
+          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+          take: Math.max(1, Math.min(BATCH_SIZE, 100)),
+        })
+
+        if (events.length === 0) return
+
+        for (const event of events) {
+          const envelope = await this.buildEnvelope(event, tx)
+          const wsEvent = this.mapWsEvent(event.type)
+
+          try {
+            this.stationGateway.broadcastToStation(event.stationId, wsEvent, envelope)
+            await tx.playbackEvent.update({
+              where: { id: event.id },
+              data: { processedAt: new Date() },
+            })
+          } catch (error) {
+            this.logger.error(
+              `Failed to broadcast playback event ${event.id} (${event.type}): ${this.describeError(error)}`,
+            )
+          }
         }
-      }
+      })
     } finally {
       this.running = false
     }
@@ -109,7 +122,7 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async buildEnvelope(event: PlaybackEventRow) {
+  private async buildEnvelope(event: PlaybackEventRow, tx: Prisma.TransactionClient) {
     const base = {
       eventId: event.id,
       stationId: event.stationId,
@@ -118,14 +131,14 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
       type: event.type,
     }
 
-    const payload = await this.normalizePayload(event)
+    const payload = await this.normalizePayload(event, tx)
     return {
       ...payload,
       ...base,
     }
   }
 
-  private async normalizePayload(event: PlaybackEventRow) {
+  private async normalizePayload(event: PlaybackEventRow, tx: Prisma.TransactionClient) {
     const payload = event.payload
     if (payload === null) return {}
     if (Array.isArray(payload)) return { payload }
@@ -141,7 +154,7 @@ export class PlaybackEventsService implements OnModuleInit, OnModuleDestroy {
           : null
 
         if (trackId && !normalized.track) {
-          const track = await this.prisma.track.findUnique({
+          const track = await tx.track.findUnique({
             where: { id: trackId },
             include: {
               uploadedBy: { select: { id: true, username: true, avatar: true } },

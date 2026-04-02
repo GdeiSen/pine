@@ -81,6 +81,8 @@ export class StationGateway
         })
         client.userId = payload.sub
         client.username = payload.username
+        client.data.userId = payload.sub
+        client.data.username = payload.username
       }
     } catch {
       // Anonymous connection is allowed, but joining requires auth.
@@ -122,6 +124,9 @@ export class StationGateway
 
     const effectiveUserId = client.userId ?? `anon:${client.id}`
     this.socketMeta.set(client.id, { userId: effectiveUserId, stationId: station.id })
+    client.data.userId = effectiveUserId
+    client.data.stationId = station.id
+    client.data.username = client.username ?? null
     if (!this.stationSockets.has(station.id)) {
       this.stationSockets.set(station.id, new Set())
     }
@@ -141,7 +146,7 @@ export class StationGateway
       this.server.to(station.id).except(client.id).emit(WS_EVENTS_V2.LISTENER_JOINED, {
         userId: client.userId,
         username: client.username,
-        listenerCount: this.stationSockets.get(station.id)?.size ?? 1,
+        listenerCount: await this.getDistributedListenerCount(station.id),
         member: member
           ? {
               id: member.id,
@@ -224,14 +229,18 @@ export class StationGateway
       sockets.delete(client.id)
       if (sockets.size === 0) {
         this.stationSockets.delete(stationId)
-        await this.stationsService.setLive(stationId, false).catch(() => undefined)
       }
+    }
+
+    const distributedListenerCount = await this.getDistributedListenerCount(stationId)
+    if (distributedListenerCount <= 0) {
+      await this.stationsService.setLive(stationId, false).catch(() => undefined)
     }
 
     this.server.to(stationId).emit(WS_EVENTS_V2.LISTENER_LEFT, {
       userId,
       username: client.username,
-      listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
+      listenerCount: distributedListenerCount,
     })
 
     if (client.username) {
@@ -258,7 +267,8 @@ export class StationGateway
     if (!station) throw new WsException('Station not found')
 
     const queue = await this.queueService.getQueue(stationId)
-    const onlineUserIds = this.getOnlineUserIds(stationId)
+    const onlineUserIds = await this.getOnlineUserIds(stationId)
+    const listenerCount = await this.getDistributedListenerCount(stationId)
     const members = await this.prisma.stationMember.findMany({
       where: { stationId },
       include: { user: { select: { id: true, username: true, avatar: true } } },
@@ -317,7 +327,7 @@ export class StationGateway
         crossfadeDuration: station.crossfadeDuration,
         playbackMode: 'DIRECT',
         activePlaylistId: station.activePlaylistId,
-        listenerCount: this.stationSockets.get(stationId)?.size ?? 0,
+        listenerCount,
       },
       currentTrack: this.toClientTrack(currentTrack),
       version: playback.version,
@@ -406,17 +416,32 @@ export class StationGateway
     return 'none'
   }
 
-  private getOnlineUserIds(stationId: string) {
+  private async getOnlineUserIds(stationId: string) {
     const userIds = new Set<string>()
-    const socketIds = this.stationSockets.get(stationId)
-    if (!socketIds) return userIds
 
-    for (const socketId of socketIds) {
-      const meta = this.socketMeta.get(socketId)
-      if (meta?.userId) userIds.add(meta.userId)
+    const sockets = await this.fetchStationSockets(stationId)
+    for (const socket of sockets) {
+      const userId = String(socket.data?.userId ?? '').trim()
+      if (!userId || userId.startsWith('anon:')) continue
+      userIds.add(userId)
     }
 
     return userIds
+  }
+
+  private async fetchStationSockets(stationId: string) {
+    if (!this.server) return []
+    try {
+      return await this.server.in(stationId).fetchSockets()
+    } catch (error) {
+      this.logger.warn(`Failed to fetch station sockets for ${stationId}: ${error}`)
+      return []
+    }
+  }
+
+  private async getDistributedListenerCount(stationId: string) {
+    const sockets = await this.fetchStationSockets(stationId)
+    return sockets.length
   }
 
   // Public method for broadcasting from background services.
