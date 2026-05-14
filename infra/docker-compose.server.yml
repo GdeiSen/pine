@@ -1,0 +1,232 @@
+name: pine-v2
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pine}
+      POSTGRES_USER: ${POSTGRES_USER:-pine}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pine_dev_password_change_me}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pine} -d ${POSTGRES_DB:-pine}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-pine}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+    ports:
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-pine}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+    entrypoint: ["/bin/sh"]
+    command:
+      - -ec
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD";
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_TRACKS";
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_COVERS";
+        mc mb --ignore-existing "local/$$MINIO_BUCKET_TRANSCODES";
+        mc anonymous set private "local/$$MINIO_BUCKET_TRACKS" || true;
+        mc anonymous set private "local/$$MINIO_BUCKET_COVERS" || true;
+        mc anonymous set private "local/$$MINIO_BUCKET_TRANSCODES" || true;
+
+  api:
+    image: pine-api:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+      target: runtime
+    command: ["/bin/sh", "-ec", "pnpm exec prisma migrate deploy && pnpm start"]
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      APP_DEPLOYMENT_MODE: direct
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_please_change_32_chars_minimum_123456}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-dev_jwt_refresh_secret_please_change_32_chars_abcdef}
+      JWT_ACCESS_EXPIRES: ${JWT_ACCESS_EXPIRES:-15m}
+      JWT_REFRESH_EXPIRES: ${JWT_REFRESH_EXPIRES:-7d}
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:3000}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      STORAGE_PATH: /data/storage
+      PLAYBACK_OUTBOX_POLL_INTERVAL_MS: ${PLAYBACK_OUTBOX_POLL_INTERVAL_MS:-400}
+      PLAYBACK_OUTBOX_BATCH_SIZE: ${PLAYBACK_OUTBOX_BATCH_SIZE:-100}
+      PLAYBACK_OUTBOX_ADVISORY_LOCK_KEY: ${PLAYBACK_OUTBOX_ADVISORY_LOCK_KEY:-741337}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      MEDIA_DIRECT_URLS_ENABLED: ${MEDIA_DIRECT_URLS_ENABLED:-0}
+      MEDIA_DIRECT_REQUIRED: ${MEDIA_DIRECT_REQUIRED:-0}
+      MEDIA_DIRECT_URL_TTL_SEC: ${MEDIA_DIRECT_URL_TTL_SEC:-900}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+    ports:
+      - "127.0.0.1:${API_PORT:-3001}:3001"
+    volumes:
+      - api_storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/api/health/ready >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  playback-worker:
+    image: pine-api:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+      target: runtime
+    command: ["pnpm", "start:playback-worker"]
+    environment:
+      NODE_ENV: production
+      APP_DEPLOYMENT_MODE: direct
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
+      STORAGE_PATH: /data/storage
+      PLAYBACK_COMMAND_POLLING_ENABLED: ${PLAYBACK_COMMAND_POLLING_ENABLED:-0}
+      PLAYBACK_POLL_INTERVAL_MS: ${PLAYBACK_POLL_INTERVAL_MS:-500}
+      PLAYBACK_HEARTBEAT_INTERVAL_MS: ${PLAYBACK_HEARTBEAT_INTERVAL_MS:-30000}
+      PLAYBACK_RECONCILE_INTERVAL_MS: ${PLAYBACK_RECONCILE_INTERVAL_MS:-5000}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+    volumes:
+      - api_storage:/data/storage
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  media-worker:
+    image: pine-api:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/server/Dockerfile
+      target: runtime
+    command: ["pnpm", "start:media-worker"]
+    environment:
+      NODE_ENV: production
+      APP_DEPLOYMENT_MODE: direct
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pine:pine_dev_password_change_me@postgres:5432/pine?schema=public}
+      STORAGE_PATH: /data/storage
+      MEDIA_POLL_INTERVAL_MS: ${MEDIA_POLL_INTERVAL_MS:-1500}
+      MEDIA_HEARTBEAT_INTERVAL_MS: ${MEDIA_HEARTBEAT_INTERVAL_MS:-30000}
+      MEDIA_MAX_BATCH_PER_TICK: ${MEDIA_MAX_BATCH_PER_TICK:-5}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-pine}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-pine_dev_minio_password_change_me}
+      MINIO_BUCKET_TRACKS: ${MINIO_BUCKET_TRACKS:-tracks}
+      MINIO_BUCKET_COVERS: ${MINIO_BUCKET_COVERS:-covers}
+      MINIO_BUCKET_TRANSCODES: ${MINIO_BUCKET_TRANSCODES:-transcodes}
+    volumes:
+      - api_storage:/data/storage
+    depends_on:
+      api:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  web:
+    image: pine-web:dev
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      target: runtime
+      args:
+        BACKEND_PROXY_TARGET: ${BACKEND_PROXY_TARGET:-http://api:3001}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+        NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-}
+        NEXT_PUBLIC_MEDIA_BASE_URL: ${NEXT_PUBLIC_MEDIA_BASE_URL:-}
+        NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-PINE}
+        NEXT_PUBLIC_AUDIO_DEBUG: ${NEXT_PUBLIC_AUDIO_DEBUG:-}
+        NEXT_PUBLIC_DIRECT_MEDIA_STRICT: ${NEXT_PUBLIC_DIRECT_MEDIA_STRICT:-1}
+        NEXT_PUBLIC_APP_DEPLOYMENT_MODE: direct
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+      NEXT_PUBLIC_SOCKET_URL: ${NEXT_PUBLIC_SOCKET_URL:-}
+      NEXT_PUBLIC_MEDIA_BASE_URL: ${NEXT_PUBLIC_MEDIA_BASE_URL:-}
+      NEXT_PUBLIC_SITE_NAME: ${NEXT_PUBLIC_SITE_NAME:-PINE}
+      NEXT_PUBLIC_AUDIO_DEBUG: ${NEXT_PUBLIC_AUDIO_DEBUG:-}
+      NEXT_PUBLIC_DIRECT_MEDIA_STRICT: ${NEXT_PUBLIC_DIRECT_MEDIA_STRICT:-1}
+      BACKEND_PROXY_TARGET: ${BACKEND_PROXY_TARGET:-http://api:3001}
+      NEXT_PUBLIC_APP_DEPLOYMENT_MODE: direct
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  api_storage:
