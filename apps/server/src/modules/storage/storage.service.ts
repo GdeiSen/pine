@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import * as fs from 'fs'
+import { Client } from 'minio'
 import {
   StorageScope,
   createMinioClientFromEnv,
@@ -18,6 +19,7 @@ export class StorageService {
   private readonly client = createMinioClientFromEnv()
   private readonly buckets = resolveStorageBucketsFromEnv()
   private readonly minioPublicEndpoint = String(process.env.MINIO_PUBLIC_ENDPOINT ?? '').trim()
+  private readonly publicPresignClient = this.createPublicPresignClient()
 
   buildObjectKey(parts: {
     stationId: string
@@ -29,8 +31,8 @@ export class StorageService {
 
   async presignGetUrl(scope: StorageScope, key: string, expiresInSeconds = 900) {
     const bucket = resolveBucketByScope(scope, this.buckets)
-    const presigned = await this.client.presignedGetObject(bucket, key, expiresInSeconds)
-    return this.rewritePresignedUrlForPublicAccess(presigned)
+    const client = this.publicPresignClient ?? this.client
+    return client.presignedGetObject(bucket, key, expiresInSeconds)
   }
 
   buildPublicObjectUrl(scope: StorageScope, key: string) {
@@ -125,24 +127,20 @@ export class StorageService {
     }
   }
 
-  private rewritePresignedUrlForPublicAccess(url: string) {
-    if (!this.minioPublicEndpoint) return url
-
+  private createPublicPresignClient() {
+    if (!this.minioPublicEndpoint) return null
     try {
       const publicBase = new URL(this.minioPublicEndpoint)
-      const presigned = new URL(url)
-      presigned.protocol = publicBase.protocol
-      presigned.hostname = publicBase.hostname
-      presigned.port = publicBase.port
-      if (publicBase.pathname && publicBase.pathname !== '/') {
-        const basePath = publicBase.pathname.endsWith('/')
-          ? publicBase.pathname.slice(0, -1)
-          : publicBase.pathname
-        presigned.pathname = `${basePath}${presigned.pathname}`
-      }
-      return presigned.toString()
+
+      return new Client({
+        endPoint: publicBase.hostname,
+        port: Number.parseInt(publicBase.port || (publicBase.protocol === 'https:' ? '443' : '80'), 10),
+        useSSL: publicBase.protocol === 'https:',
+        accessKey: process.env.MINIO_ACCESS_KEY ?? process.env.MINIO_ROOT_USER ?? '',
+        secretKey: process.env.MINIO_SECRET_KEY ?? process.env.MINIO_ROOT_PASSWORD ?? '',
+      })
     } catch {
-      return url
+      return null
     }
   }
 }

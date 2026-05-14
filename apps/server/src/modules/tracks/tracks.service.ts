@@ -759,11 +759,6 @@ export class TracksService {
           error instanceof Error ? error.message : String(error)
         }`,
       )
-      const publicUrl = this.storageService.buildPublicObjectUrl(scope, asset.objectKey)
-      if (publicUrl) {
-        this.logger.warn(`Falling back to public media URL for ${asset.objectKey}`)
-        return publicUrl
-      }
       return null
     }
   }

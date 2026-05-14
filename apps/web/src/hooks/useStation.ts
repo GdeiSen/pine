@@ -15,6 +15,7 @@ const PLAY_PAUSE_INTENT_GRACE_MS = 2_200
 const SEEK_INTENT_GRACE_MS = 2_500
 const INITIAL_STATION_SYNC_TIMEOUT_MS = 8_000
 const DIRECT_COMMAND_WAIT_TIMEOUT_MS = 15_000
+const DIRECT_STALL_RECONCILE_MS = 7_500
 
 function normalizeLoopMode(value: unknown): 'none' | 'track' | 'queue' {
   if (value === 'track' || value === 'TRACK') return 'track'
@@ -51,6 +52,7 @@ export function useStation(code: string, joinPassword?: string | null) {
   const serverOffsetRef = useRef<number | null>(null)
   const bestServerOffsetRef = useRef<{ offsetMs: number; rttMs: number } | null>(null)
   const localTickAnchorRef = useRef<number | null>(null)
+  const directStallSinceRef = useRef<number | null>(null)
   const pendingTrackSyncRef = useRef<{ trackId: string; sinceMs: number } | null>(null)
   const playPauseIntentRef = useRef<{
     action: 'play' | 'pause'
@@ -812,6 +814,33 @@ export function useStation(code: string, joinPassword?: string | null) {
         !!pendingDirectCommandRef.current && Date.now() <= pendingDirectCommandRef.current.expiresAt
       const directTransitionActive =
         isDirectPlayback && activeAudioRef.current.isTransportTransitionActive()
+      const directStuck =
+        isDirectPlayback &&
+        !!currentTrack &&
+        !isPaused &&
+        (
+          audioConnectionState === 'connecting' ||
+          audioConnectionState === 'buffering' ||
+          audioConnectionState === 'reconnecting' ||
+          pendingDirectActive ||
+          directTransitionActive ||
+          pendingActive
+        )
+
+      if (directStuck) {
+        const since = directStallSinceRef.current ?? Date.now()
+        directStallSinceRef.current = since
+
+        if (Date.now() - since >= DIRECT_STALL_RECONCILE_MS) {
+          directStallSinceRef.current = Date.now()
+          void refreshStationSnapshot().finally(() => {
+            void activeAudioRef.current.restartAudio()
+          })
+        }
+      } else {
+        directStallSinceRef.current = null
+      }
+
       if (pending && !pendingActive) {
         pendingTrackSyncRef.current = null
       }

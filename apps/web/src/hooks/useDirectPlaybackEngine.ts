@@ -29,7 +29,6 @@ const STREAM_MANIFEST_CACHE_TTL_MS = 5 * 60_000
 const DIRECT_MEDIA_STRICT = process.env.NEXT_PUBLIC_DIRECT_MEDIA_STRICT !== '0'
 
 type DirectTransportPhase = 'idle' | 'pause' | 'track-change' | 'seek'
-type BrowserAudioContext = AudioContext
 
 type UseDirectPlaybackEngineArgs = {
   trackId: string | null
@@ -260,23 +259,6 @@ function clampVolume(value: number) {
   return value
 }
 
-function getAudioContextConstructor(): {
-  new (): BrowserAudioContext
-} | null {
-  if (typeof window === 'undefined') return null
-
-  const ctor =
-    window.AudioContext ??
-    (window as typeof window & {
-      webkitAudioContext?: {
-        new (): BrowserAudioContext
-      }
-    }).webkitAudioContext
-
-  if (typeof ctor !== 'function') return null
-  return ctor as { new (): BrowserAudioContext }
-}
-
 export function useDirectPlaybackEngine({
   trackId,
   prefetchTrackId = null,
@@ -309,9 +291,6 @@ export function useDirectPlaybackEngine({
   const volumeFadeRafRef = useRef<number | null>(null)
   const volumeFadeTokenRef = useRef(0)
   const targetVolumeRef = useRef(clampVolume(volume))
-  const audioContextRef = useRef<BrowserAudioContext | null>(null)
-  const mediaSourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null)
-  const gainNodeRef = useRef<GainNode | null>(null)
   const isPausedRef = useRef(isPaused)
   const trackDurationRef = useRef(trackDuration)
   const currentPositionRef = useRef(currentPosition)
@@ -458,82 +437,11 @@ export function useDirectPlaybackEngine({
     [setNeedsRestart],
   )
 
-  const teardownGainLayer = useCallback(() => {
-    try {
-      mediaSourceNodeRef.current?.disconnect()
-    } catch {
-      // no-op
-    }
-    try {
-      gainNodeRef.current?.disconnect()
-    } catch {
-      // no-op
-    }
-
-    mediaSourceNodeRef.current = null
-    gainNodeRef.current = null
-
-    const context = audioContextRef.current
-    audioContextRef.current = null
-    if (context) {
-      void context.close().catch(() => undefined)
-    }
-  }, [])
-
-  const readOutputGain = useCallback(() => {
-    const gainNode = gainNodeRef.current
-    if (gainNode) return clampVolume(gainNode.gain.value)
-    const audio = audioRef.current
-    return clampVolume(audio?.volume ?? 1)
-  }, [])
-
   const setOutputGain = useCallback((target: number) => {
     const clamped = clampVolume(target)
-    const gainNode = gainNodeRef.current
-    if (gainNode) {
-      gainNode.gain.value = clamped
-      return
-    }
-
     const audio = audioRef.current
     if (audio) {
       audio.volume = clamped
-    }
-  }, [])
-
-  const ensureGainLayer = useCallback(() => {
-    const audio = audioRef.current
-    if (!audio) return false
-
-    if (gainNodeRef.current && mediaSourceNodeRef.current && audioContextRef.current) {
-      audio.volume = 1
-      return true
-    }
-
-    const Ctor = getAudioContextConstructor()
-    if (!Ctor) return false
-
-    try {
-      const context = audioContextRef.current ?? new Ctor()
-      audioContextRef.current = context
-
-      const sourceNode =
-        mediaSourceNodeRef.current ?? context.createMediaElementSource(audio)
-      mediaSourceNodeRef.current = sourceNode
-
-      const gainNode = gainNodeRef.current ?? context.createGain()
-      gainNodeRef.current = gainNode
-
-      sourceNode.disconnect()
-      gainNode.disconnect()
-      sourceNode.connect(gainNode)
-      gainNode.connect(context.destination)
-      gainNode.gain.value = clampVolume(targetVolumeRef.current)
-      audio.volume = 1
-
-      return true
-    } catch {
-      return false
     }
   }, [])
 
@@ -547,17 +455,18 @@ export function useDirectPlaybackEngine({
 
   const fadeVolumeTo = useCallback(
     (target: number, durationMs: number, onComplete?: () => void) => {
-      if (!audioRef.current) {
+      const audio = audioRef.current
+      if (!audio) {
         onComplete?.()
         return
       }
 
       const clampedTarget = clampVolume(target)
-      const startVolume = readOutputGain()
+      const startVolume = clampVolume(audio.volume)
       const duration = Math.max(0, durationMs)
 
       if (duration <= 0 || Math.abs(startVolume - clampedTarget) < 0.001) {
-        setOutputGain(clampedTarget)
+        audio.volume = clampedTarget
         onComplete?.()
         return
       }
@@ -575,9 +484,8 @@ export function useDirectPlaybackEngine({
 
         const t = Math.max(0, Math.min(1, (now - startedAt) / duration))
         const eased = 1 - Math.pow(1 - t, 3)
-        setOutputGain(
-          startVolume + (clampedTarget - startVolume) * eased,
-        )
+        const next = startVolume + (clampedTarget - startVolume) * eased
+        audioRef.current.volume = clampVolume(next)
 
         if (t < 1) {
           volumeFadeRafRef.current = window.requestAnimationFrame(step)
@@ -590,7 +498,7 @@ export function useDirectPlaybackEngine({
 
       volumeFadeRafRef.current = window.requestAnimationFrame(step)
     },
-    [readOutputGain, setOutputGain],
+    [],
   )
 
   const fadeInToTargetVolume = useCallback(() => {
@@ -802,12 +710,8 @@ export function useDirectPlaybackEngine({
 
       playRequestInFlightRef.current = true
       try {
-        const gainLayerReady = ensureGainLayer()
-        if (gainLayerReady) {
-          await audioContextRef.current?.resume().catch(() => undefined)
-        }
         stopVolumeFade()
-        setOutputGain(0)
+        audio.volume = 0
         await audio.play()
         if (!mountedRef.current || token !== playTokenRef.current) return
         fadeInToTargetVolume()
@@ -835,8 +739,6 @@ export function useDirectPlaybackEngine({
       finishTransportTransition,
       setConnectionStatus,
       setNeedsRestart,
-      ensureGainLayer,
-      setOutputGain,
       stopVolumeFade,
     ],
   )
@@ -1392,18 +1294,13 @@ export function useDirectPlaybackEngine({
       prefetchUrlRef.current = null
       sourceUrlRef.current = null
       sourceDescriptorRef.current = null
-      teardownGainLayer()
       pendingTargetPositionRef.current = null
       engineCallbacksRef.current.finishTransportTransition()
       engineCallbacksRef.current.clearTransitionState()
       engineCallbacksRef.current.clearResumeSyncGrace()
       engineCallbacksRef.current.clearStallRecovery(true)
-      if (driftTimerRef.current !== null) {
-        window.clearInterval(driftTimerRef.current)
-        driftTimerRef.current = null
-      }
     }
-  }, [setOutputGain, teardownGainLayer])
+  }, [])
 
   // Volume
   useEffect(() => {
@@ -1596,46 +1493,6 @@ export function useDirectPlaybackEngine({
     trackId,
     trackStartedAt,
   ])
-
-  // Periodic drift correction
-  useEffect(() => {
-    if (driftTimerRef.current !== null) {
-      window.clearInterval(driftTimerRef.current)
-      driftTimerRef.current = null
-    }
-
-    if (!trackId || isPaused) return
-
-    driftTimerRef.current = window.setInterval(() => {
-      const audio = audioRef.current
-      if (!audio || audio.paused || audio.readyState < 3) return
-      if (!sourcePlaybackStartedRef.current) return
-      if (connectionStateRef.current !== 'playing') return
-      if (isTransportTransitionActive()) return
-      const expected = getExpectedPosition()
-      if (expected < 0) return
-      const actual = audio.currentTime
-      const driftMs = (actual - expected) * 1000
-      setAudioDiagnostics({
-        driftMs,
-        targetPosition: expected,
-        actualPosition: actual,
-        syncType: 'drift-correction',
-        rttMs: null,
-        updatedAt: Date.now(),
-      })
-      if (Math.abs(actual - expected) > DRIFT_THRESHOLD_S) {
-        audio.currentTime = expected
-      }
-    }, DRIFT_CORRECTION_INTERVAL_MS)
-
-    return () => {
-      if (driftTimerRef.current !== null) {
-        window.clearInterval(driftTimerRef.current)
-        driftTimerRef.current = null
-      }
-    }
-  }, [getExpectedPosition, isPaused, isTransportTransitionActive, trackId])
 
   const restartAudio = useCallback(() => {
     if (!trackId) return
