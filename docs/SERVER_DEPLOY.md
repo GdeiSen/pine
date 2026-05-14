@@ -31,7 +31,7 @@ cd pine
 ## Step 3 — Configure environment
 
 ```bash
-cp infra/.env.server.example infra/.env
+cp infra/env.server.example infra/.env
 nano infra/.env
 ```
 
